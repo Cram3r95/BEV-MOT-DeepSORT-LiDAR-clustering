@@ -6,7 +6,7 @@ The present work proposes an accurate and real-time Deep Learning based Multi-Ob
 A sensor fusion is performed merging 2D Visual Object Tracking (based on the CenterNet and Deep SORT algorithms) using a ZED camera, and 3D proposals using 
 a LiDAR point cloud over the ROS framework and Docker containers.
 
-<img src="images/Architecture.png" width="665" height="370" />
+<img src="images/Architecture.PNG" width="665" height="370" />
 
 A comparison between the traditional Precision-Tracking strategy, Deep Learning based Visual Object Tracking and sensor fusion approach with LiDAR 
 is carried out comparing the obtained pose estimations for each of them. Moreover, the proposals have been validated on the KITTI benchmark dataset for 
