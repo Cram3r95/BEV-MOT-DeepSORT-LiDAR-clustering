@@ -26,24 +26,19 @@ import numpy as np
 import os
 import cv2
 import sys, time
-
-# YOLO imports
-
-from yolov3_ros.msg import yolo_list
-from yolov3_ros.msg import yolo_obstacle
-
 from PIL import Image
 from argparse import ArgumentParser
-
 
 # ROS imports
 
 import rospy
 import sensor_msgs.msg
 
+from t4ac_msgs.msg import BEV_tracker, BEV_trackers_list
+
 # CenterNet and DeepSort imports
 
-CENTERNET_PATH = '/root/ros_ws/src/centerNet-deep-sort/CenterNet/src/lib'
+CENTERNET_PATH = './CenterNet/src/lib'
 sys.path.insert(0, CENTERNET_PATH)
 from detectors.detector_factory import detector_factory
 from opts import opts
@@ -67,41 +62,20 @@ opt = opts().init('{} --load_model {} --arch {}'.format(task, model_path, arch).
 
 opt.vis_thresh = 0.4
 
-# input_type
-
-opt.input_type = 'ros' # for webcam, 'webcam', for ip camera, 'ipcam', for video, 'vid', for ROS topic, 'ros'
-
-#------------------------------
-# for video
-# opt.vid_path = 'MOT16-11.mp4'  #
-opt.vid_path = '/home/robesafe/compartido_con_docker/Nuevos_Ficheros_CGH/Videos/Overtaking_frontal_1032.mp4'
-#------------------------------
-# for webcam  (webcam device index is required)
-opt.webcam_ind = 0
-#------------------------------
-# for ipcamera (camera url is required.this is dahua url format)
-opt.ipcam_url = 'rtsp://{0}:{1}@IPAddress:554/cam/realmonitor?channel={2}&subtype=1'
-# ipcamera camera number
-opt.ipcam_no = 8
-#------------------------------
-
-with open('/root/ros_ws/src/centerNet-deep-sort/yolov3-model/coco.names','r') as coco_names:
+with open('./yolov3-model/coco.names','r') as coco_names:
     classes = coco_names.read().splitlines()
-    # If we use just coco_names.readlines(), the output would have \n
 
-def bbox_to_xywh_cls_conf(bbox): # In bbox it can be found all objects (car, persons, bycicles, etc.) procesed by YOLOv3
-    # Now, we can add the corresponding objects to be tracked. Note that you have to check the id of the required object to be tracked in coco.names file
-  
+def bbox_to_xywh_cls_conf(bbox):
+    """
+    """
     type_object_list = [1,2,3] # person_id = 1, bicycle_id = 2, car_id = 3
     
     bbox_of_interest = []
-    
-    
-    
+
     k = 0
     
     for i in type_object_list:
-        bbox_object = bbox[i]
+        bbox_object = bbox[i] 
         r,c = bbox_object.shape
         aux = np.zeros((r,1))
         aux.fill(i)
@@ -126,105 +100,7 @@ def bbox_to_xywh_cls_conf(bbox): # In bbox it can be found all objects (car, per
         
     else:   
         return None, None, None
-        
-class Detector(object):
-    def __init__(self, opt):
-        
-        
-        self.vdo = cv2.VideoCapture()
-        
-        # CenterNet detector
-        
-        self.detector = detector_factory[opt.task](opt)
-        self.deepsort = DeepSort("deep/checkpoint/ckpt.t7")
-        
-        self.write_video = True
-        
-    def open(self, video_path):
-    
-        # Webcam 
-        if opt.input_type == 'webcam':
-            self.vdo.open(opt.webcam_ind)
-        
-        # Ip camera
-        elif opt.input_type == 'ipcam':
-            # load cam key, secret
-            with open("cam_secret.txt") as f:
-                lines = f.readlines()
-                key = lines[0].strip()
-                secret = lines[1].strip()
-                
-            self.vdo.open(opt.ipcam_url.format(key, secret, opt.ipcam_no))
-        
-        # Video    
-        elif opt.input_type == 'vid':
-            assert os.path.isfile(opt.vid_path), "Error: path error"
-            self.vdo.open(opt.vid_path)
-        
-        # ROS topic    
-        else:
-            print(" ")
-        
-        self.im_width = int(self.vdo.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.im_height = int(self.vdo.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.area = 0,0,self.im_width,self.im_height
-        
-        if (self.write_video):
-            fourcc = cv2.VideoWriter_fourcc(*'MJPG')
-            self.output = cv2.VideoWriter("recorded_tracking.avi", fourcc, 20, (self.im_width, self.im_height))
-        # return self.vdo.isOpened()
-        
-    def detect(self):
-        xmin, ymin, xmax, ymax = self.area
-        frame_no = 0
-        avg_fps = 0.0
-        
-        aux_score = []
-        
-        while self.vdo.grab():
-        
-            frame_no += 1
-            
-            start = time.time()
-            
-            _, ori_im = self.vdo.retrieve()
-            im = ori_im[ymin:ymax, xmin:xmax]
-            # im = ori_im[ymin:ymax, xmin:xmax, :]
-            
-            results = self.detector.run(im)['results'] 
-            bbox_xywh, cls_conf, type_object = bbox_to_xywh_cls_conf(results)
-            
-            aux_score = cls_conf
-            # bbox_xywh represents the upper left corner and bottom right corner u,v coordinates in camera frame
-            # cls_conf represents the score confidence for each detected object
-            
-            #print(cls_conf)
-            
-            if bbox_xywh is not None:
-                outputs = self.deepsort.update(bbox_xywh, cls_conf, im)
-                
-                if len(outputs) > 0: # At least an object was detected
-                    bbox_xyxy = outputs[:,:4] # :4 means the first four columns (0 to 3 column)
-                    identities = outputs[:,-1] # Objects identifiers (1, 2, ...). -1 means the last column
-
-                    ori_im, colours = draw_bboxes(aux_score, type_object, classes, ori_im, bbox_xyxy, identities, offset=(xmin,ymin))
-                    
-            end = time.time()
-            
-            fps = 1/(end-start)
-            
-            avg_fps += fps 
-            
-            print("CenterNet time: {}s, fps: {}, avg fps: {}".format(round(end-start,3), round(fps,3), round(avg_fps/frame_no,3)))
-            
-            # Tracking and Detection visualization
-            
-            cv2.imshow("YOLOv3 + DeepSORT + CenterNet", ori_im)
-            cv2.waitKey(1)
-            
-            if (self.write_video):
-                self.output.write(ori_im)
-        
+         
 class image_feature:
     def __init__(self, args,opt):
         
@@ -235,18 +111,18 @@ class image_feature:
         
         # ROS publishers
         
-        self.image_pub = rospy.Publisher('/perception/image_visual_mot', sensor_msgs.msg.Image, queue_size = 1)
-        self.yolo_list_pub = rospy.Publisher('/perception/list_visual_mot', yolo_list, queue_size=20)
+        self.pub_image_with_vot = rospy.Publisher('/t4ac/perception/image_visual_mot', sensor_msgs.msg.Image, queue_size = 1)
+        self.pub_tracker_list = rospy.Publisher('/t4ac/perception/tracked_obstacles', BEV_trackers_list, queue_size=20)
         
         # ROS subscriber
         
-        self.topic = args.topic
-        self.subscriber = rospy.Subscriber(self.topic, sensor_msgs.msg.Image, self.callback, queue_size = 5)
+        self.image_topic = args.image_topic
+        self.image_subscriber = rospy.Subscriber(self.image_topic, sensor_msgs.msg.Image, self.callback, queue_size = 5)
         
         # Detection file 
         
-        self.filename = 'yolov3_detection.txt'
-        self.path = '/root/ros_ws/src/centerNet-deep-sort/' + self.filename
+        self.filename = 'tracked_obstacles.txt'
+        self.path = pwd + '/results/' + self.filename
         
         self.write_video = True
         
@@ -256,6 +132,7 @@ class image_feature:
         
         # Left eye (ZED camera - Amplied Projection Matrix (3 x 4 -> 4 x 4, adding 0,0,0,1)
         
+        self.camera_height = 1.64 # ZED camera in Techs4AgeCar (Real-World)
         P = np.matrix([[672.8480834960938,0.0,664.2965087890625,0.0],
                        [0.0,672.8480834960938,347.0620422363281,0.0],
                        [0.0,0.0,1.0,0.0],
@@ -265,21 +142,69 @@ class image_feature:
         
         self.avg_fps = float(0)
         self.frame_no = 0
+
+    def image_to_realworld(self, color, object_score, object_id, object_type, obj_coordinates):
         
-    def callback(self, rosmsg):
+        # 2D to Bird's Eye View (LiDAR frame, z-filtered) projection
         
+        tracked_obstacle = BEV_tracker()
+        tracked_obstacle.type = object_type
+        tracked_obstacle.object_id = object_id
+  
+        # 3D box dimensions that ties the object 
+        #TODO: Improve this 3D information recovery
+        
+        tracked_obstacle.w = 0 
+        tracked_obstacle.l = 0
+        tracked_obstacle.o = 0
+   
+        # Object colors (since the colours in Yolo detection are in BGR, so they must be converted to RGB for ROS topic )
+        #TODO: Publish as a visualization marker when the 3D information (width, length, orientation) is correct
+        #tracked_obstacle.color.a = 1.0
+        #tracked_obstacle.color.r = color[0]/255 
+        #tracked_obstacle.color.g = color[1]/255
+        #tracked_obstacle.color.b = color[2]/255
+
+        # Image world to Bird's Eye View (LiDAR frame, z-filtered) projection
+        
+        centroid_x = (obj_coordinates[0]+obj_coordinates[2])/2
+        pixels = np.matrix([[centroid_x], [obj_coordinates[3]], [0], [1]]) # 4 x 1
+        p_camera = np.dot(self.inv_proj_matrix,pixels) 
+        K = self.camera_height/p_camera[1]
+        p_camera_meters = np.dot(p_camera,K) # Camera frame  
+        
+        # If the camera is not parallel to the floor
+        # if (p_camera_meters[2] > 4.1):
+        #    correction = 1 +((p_camera_meters[2]-4)*0.65/46)
+        #    p_camera_meters[2] = p_camera_meters[2]/correction
+        #    p_camera_meters[3] = correction
+        
+        # Publish coordinates in BEV frame (LiDAR frame)
+        
+        # Note that LiDAR x-axis corresponds to ZED z-axis, y-axis to (-)x-axis and z-axis to (-)y-axis
+        
+        tracked_obstacle.x = float(p_camera_meters[2]) 
+        tracked_obstacle.y = float(-p_camera_meters[0])
+        
+        # Append single tracked obstacle to tracked obstacle list
+        
+        self.tracked_obstacles_list.tracked_obstacle_list.append(tracked_obstacle)
+        
+    def callback(self, image_rosmsg):
+        """
+        """
         self.frame_no += 1
         
         aux_score = []
 
-        self.subscriber.unregister()
-        ros_image = rosmsg
+        self.image_subscriber.unregister()
+        ros_image = image_rosmsg
         
         # Image from camera topic
         
         mode = 'RGBA'
         
-        if self.topic == "/zed//zed_node/left/image_rect_color":
+        if self.topic == "/zed/zed_node/left/image_rect_color":
             mode = 'RGBA' # RGB
         
         image = Image.frombytes(mode, (ros_image.width, ros_image.height), ros_image.data)
@@ -295,9 +220,7 @@ class image_feature:
         xmin, ymin, xmax, ymax = self.area
         
         ori_im = np.array(image)
-        # image = Resize((416,416), Image.BILINEAR)(image)
-        #cv2.imwrite("./prueba.png", ori_im)
-        
+
         self.start = time.time()
         
         im = ori_im[ymin:ymax, xmin:xmax, :]
@@ -307,8 +230,9 @@ class image_feature:
         
         aux_score = cls_conf
         
-        self.tracked_obstacle_list = yolo_list()
-        
+        self.tracked_obstacles_list = BEV_trackers_list()
+        self.tracked_obstacles_list.header.stamp = image_rosmsg.header.stamp
+
         if bbox_xywh is not None: # At least one object was detected
             self.outputs = self.deepsort.update(bbox_xywh, cls_conf, im)
             
@@ -319,8 +243,6 @@ class image_feature:
                 ori_im, colours = draw_bboxes(aux_score, type_object, classes, ori_im, bbox_xyxy, identities, offset=(xmin,ymin))
                 
                 r,c = bbox_xyxy.shape
-               
-                #self.end_aux = time.time()
  
                 for i in range(r):
                     obj_coordinates = bbox_xyxy[i]
@@ -333,137 +255,66 @@ class image_feature:
                             
                             score = float(aux_score[i]) if aux_score is not None else 0 # Object score confidence
                             score = round(score, 2)
-                            
-                            object_id = int(identities[i]) if identities is not None else 0 # Object ID
-                            
+
+                            object_id = int(identities[i]) if identities is not None else 0 # Object ID 
+
                             color = colours[i]
     
-                            image_feature.Image_to_RealWorld(self, color, score, object_id, obj_coordinates, object_type, ori_im)
+                            image_feature.image_to_realworld(self, color, score, object_id, object_type, obj_coordinates)
                     except:
                         print(" ")
                  
-                im_from_array = Image.fromarray(ori_im) #ToPILImage()(image)
+                im_from_array = Image.fromarray(ori_im)
         
-                yolov3_tracking_output_image = sensor_msgs.msg.Image()
-                yolov3_tracking_output_image.header.frame_id = rosmsg.header.frame_id
-                yolov3_tracking_output_image.header.stamp = rosmsg.header.stamp
-                yolov3_tracking_output_image.encoding = 'bgr8' 
-                (yolov3_tracking_output_image.width, yolov3_tracking_output_image.height) = im_from_array.size
-                yolov3_tracking_output_image.step = 3 * yolov3_tracking_output_image.width
-                yolov3_tracking_output_image.data = im_from_array.tobytes()
+                output_ros_image = sensor_msgs.msg.Image()
+                output_ros_image.header.frame_id = image_rosmsg.header.frame_id
+                output_ros_image.header.stamp = image_rosmsg.header.stamp
+                output_ros_image.encoding = 'bgr8' 
+                output_ros_image.width, output_ros_image.height = im_from_array.size
+                output_ros_image.step = 3 * output_ros_image.width
+                output_ros_image.data = im_from_array.tobytes()
             
-                self.image_pub.publish(yolov3_tracking_output_image)
+                self.image_pub.publish(output_ros_image)
             
             else: # None object was tracked
-                tracked_obstacle = yolo_obstacle()
+                tracked_obstacle = BEV_tracker()
                 
                 tracked_obstacle.type = "nothing"
                 
-                self.tracked_obstacle_list.yolo_list.append(tracked_obstacle)
-                self.tracked_obstacle_list.header.stamp = rospy.Time.now()
+                self.tracked_obstacles_list.header.stamp = rospy.Time.now()
+                self.tracked_obstacles_list.tracked_obstacles_list.append(tracked_obstacle)
                 
-                self.image_pub.publish(rosmsg)
+                self.pub_image_with_vot.publish(image_rosmsg)
                 
         else: # None object was detected
-            tracked_obstacle = yolo_obstacle()
+            tracked_obstacle = BEV_tracker()
             
             tracked_obstacle.type = "nothing"
             
-            self.tracked_obstacle_list.yolo_list.append(tracked_obstacle)
-            self.tracked_obstacle_list.header.stamp = rospy.Time.now()
+            self.tracked_obstacles_list.header.stamp = rospy.Time.now()
+            self.tracked_obstacles_list.tracked_obstacles_list.append(tracked_obstacle)
             
-            self.image_pub.publish(rosmsg)
-            
-        self.yolo_list_pub.publish(self.tracked_obstacle_list)     
+            self.pub_image_with_vot.publish(image_rosmsg)
+
+        self.pub_tracker_list.publish(self.tracked_obstacle_list)     
         
         self.end = time.time()
         
         fps = 1/(self.end-self.start)
-        #fps_aux = 1/(self.end_aux-self.start)
         
         self.avg_fps += fps 
-        #avg_fps_aux += fps_aux
         
         print("CenterNet time: {}s, fps: {}, avg fps: {}".format(round(self.end-self.start,3), round(fps,3), round(self.avg_fps/self.frame_no,3)))
         
         # Tracking and Detection visualization
         
-        #cv2.imshow("YOLOv3 + DeepSORT + CenterNet", ori_im)
+        #cv2.imshow("CenterNet + DeepSORT", ori_im)
         #cv2.waitKey(1)
         
         #if (self.write_video):
         #    self.output.write(ori_im)
 
-        self.subscriber = rospy.Subscriber(self.topic, sensor_msgs.msg.Image, self.callback, queue_size = 5)
-
-    def Image_to_RealWorld(self, color, object_score, object_id, obj_coordinates, object_type, ori_im):
-        
-        # 2D to 3D projection
-        
-        tracked_obstacle = yolo_obstacle()
-        
-        camera_height = 1.64 # ZED camera in SmartElderlyCar (Real-World)
-
-        tracked_obstacle.type = object_type
-        
-        # Bounding Box coordinates in camera frame
-        
-        tracked_obstacle.x1 = obj_coordinates[0]
-        tracked_obstacle.y1 = obj_coordinates[1]
-        tracked_obstacle.x2 = obj_coordinates[2]
-        tracked_obstacle.y2 = obj_coordinates[3]
-        
-        # 3D box dimensions that ties the object
-        
-        tracked_obstacle.h = 2.0 
-        tracked_obstacle.w = 1.0
-        tracked_obstacle.l = 1.0
-        
-        # Object score
-        
-        tracked_obstacle.probability = object_score
-        
-        # Object ID
-        
-        tracked_obstacle.object_id = object_id
-        
-        # Object colors (since the colours in Yolo detection are in BGR, so they must be converted to RGB for ROS topic )
-        
-        tracked_obstacle.color.a = 1.0
-        tracked_obstacle.color.r = color[0]/255 
-        tracked_obstacle.color.g = color[1]/255
-        tracked_obstacle.color.b = color[2]/255
-
-        # Image world to Real world
-        
-        centroid_x = (tracked_obstacle.x1+tracked_obstacle.x2)/2
-
-        pixels = np.matrix([[centroid_x], [tracked_obstacle.y2], [1], [1]])
-      
-        p_camera = self.inv_proj_matrix * pixels
-        
-        K = camera_height/p_camera[1]
-        
-        p_camera_meters = p_camera*K    
-        
-        # If the camera is not parallel to the floor
-        # if (p_camera_meters[2] > 4.1):
-        #    correction = 1 +((p_camera_meters[2]-4)*0.65/46)
-        #    p_camera_meters[2] = p_camera_meters[2]/correction
-        #    p_camera_meters[3] = correction
-        
-        # Publish coordinates in real world frame (LiDAR coordinates)
-        
-        # Note that LiDAR x-axis corresponds to ZED z-axis, y-axis to (-)x-axis and z-axis to (-)y-axis
-        
-        tracked_obstacle.tx = float(p_camera_meters[2]) 
-        tracked_obstacle.ty = float(-p_camera_meters[0])
-        tracked_obstacle.tz = float(-p_camera_meters[1])
-        
-        # Append single tracked obstacle to tracked obstacle list
-        
-        self.tracked_obstacle_list.yolo_list.append(tracked_obstacle)
-        self.tracked_obstacle_list.header.stamp = rospy.Time.now()
+        self.image_subscriber = rospy.Subscriber(self.image_topic, sensor_msgs.msg.Image, self.callback, queue_size = 5)
 
 def main(args):
     print(args)
@@ -479,35 +330,20 @@ def main(args):
 
 if __name__ == '__main__':
 
-    # Detection and Tracking on Video, IP_Camera or Webcam
-        
-    if (opt.input_type == 'webcam' or opt.input_type == 'ipcam' or opt.input_type == 'vid'):
-
-        # Initialize visualization
-        
-        cv2.namedWindow("YOLOv3 + DeepSORT + CenterNet", cv2.WINDOW_NORMAL)
-        cv2.resizeWindow("YOLOv3 + DeepSORT + CenterNet", 800, 600)
-        
-        det = Detector(opt)
-        det.open(opt.vid_path)
-        det.detect()
-
     # Detection and Tracking on ROS topic
+      
+    parser = ArgumentParser()
+    parser.add_argument('--num-workers', type=int, default=4)
+    parser.add_argument('--batch-size', type=int, default=1)
+    parser.add_argument('--cpu', action='store_true')
+    parser.add_argument('--visualize', action='store_true')
+    parser.add_argument('--image_topic', default="/zed/zed_node/left/image_rect_color")
     
-    elif opt.input_type == 'ros':
-        
-        parser = ArgumentParser()
-        parser.add_argument('--num-workers', type=int, default=4)
-        parser.add_argument('--batch-size', type=int, default=1)
-        parser.add_argument('--cpu', action='store_true')
-        parser.add_argument('--visualize', action='store_true')
-        parser.add_argument('--topic', default="/zed/zed_node/left/image_rect_color")
-        
-        args = parser.parse_args()
-        
-        print("\nProcessing ROS topic:", args.topic," ")
-        
-        main(args)
+    args = parser.parse_args()
+    
+    print("\nProcessing ROS topic:", args.topic," ")
+    
+    main(args)
 
     
     
