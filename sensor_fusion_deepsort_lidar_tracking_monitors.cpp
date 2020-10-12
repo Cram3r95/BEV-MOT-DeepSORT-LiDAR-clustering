@@ -1,11 +1,18 @@
 /***
+Created on Thu Dec  8 16:45:21 2019
 
-Carlos Gómez Huélamo August 2019
+@author: Carlos Gomez-Huelamo
 
-Sensor fusion and monitors
+Code to process the fusion between LiDAR clusters based on PCL algorithms and BEV (Bird's Eye View) 
+Object Tracking using the Global Nearest Neighbour (GNN) approach and evaluate the objects according 
+to some specified behaviours (ACC, Give Way, STOP, etc.)
 
-ROS topic (/yolov3_tracking_list/) already includes the detected objects with an identification (ID) and label (semantic information: car or person) that shows the tracking process.
+Inputs:  BEV Object Tracking, LiDAR pointclud and Monitorized Lanes
+Outputs: Evaluated behaviours
 
+SmartElderlyCar (SEC) - Tech4AgeCar (T4AC) project
+
+Simulation
 ***/
 
 // Includes //

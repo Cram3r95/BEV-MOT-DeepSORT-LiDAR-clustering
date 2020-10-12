@@ -1,5 +1,4 @@
 /***
-
 Carlos Gómez Huélamo December 2019
 
 3D tracking, precision tracking and monitors
@@ -7,7 +6,6 @@ Carlos Gómez Huélamo December 2019
 SmartElderlyCar (SEC) - Tech4AgeCar (T4AC) project
 
 Simulation
-
 ***/
 
 // Includes //
