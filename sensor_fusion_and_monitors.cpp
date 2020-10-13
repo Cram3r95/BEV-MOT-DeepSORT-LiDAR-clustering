@@ -1,7 +1,14 @@
 /***
-Carlos Gómez Huélamo December 2019
+Created on Thu Dec  8 16:45:21 2019
 
-3D tracking, precision tracking and monitors
+@author: Carlos Gomez-Huelamo
+
+Code to process the fusion between LiDAR clusters based on PCL algorithms and BEV (Bird's Eye View) 
+Object Tracking using the Global Nearest Neighbour (GNN) approach and evaluate the objects according 
+to some specified behaviours (ACC, Give Way, STOP, etc.)
+
+Inputs:  BEV Object Tracking, LiDAR pointclud and Monitorized Lanes
+Outputs: Evaluated behaviours
 
 SmartElderlyCar (SEC) - Tech4AgeCar (T4AC) project
 
@@ -20,12 +27,6 @@ Simulation
 #include <iomanip>
 #include <ctime>
 #include <vector>
-
-// OpenCV includes
-#include <opencv2/video/tracking.hpp>
-#include <opencv2/highgui/highgui.hpp>
-#include "opencv2/core/core.hpp"
-#include <cv_bridge/cv_bridge.h>
 
 // ROS includes
 #include <ros/ros.h>
@@ -88,13 +89,9 @@ Simulation
 #include <pcl/sample_consensus/model_types.h>
 #include <pcl/impl/point_types.hpp>
 
-// YOLO includes
-#include "yolov3_centernet_ros/yolo_list.h"
-#include "yolov3_centernet_ros/yolo_obstacle.h"
-
-// CARLA includes
-#include "carla_msgs/CarlaObjectLocation.h"
-#include "carla_msgs/CarlaObjectLocationList.h"
+// BEV Tracking includes
+#include ".h"
+#include ".h"
 
 // SEC (SmartElderlyCar) includes
 #include <sec_msgs/Route.h>
@@ -105,24 +102,12 @@ Simulation
 #include <sec_msgs/ObstacleArray.h>
 #include "map_manager_base.hpp"
 
-// Precision tracking includes
-#include <precision_tracking/track_manager_color.h>
-#include <precision_tracking/tracker.h>
-#include <precision_tracking/high_res_timer.h>
-#include <precision_tracking/sensor_specs.h>
-
 // End Includes //
 
 
 // Defines //
 
-#define VER_OBJETOS_AGRUPADOS 0
-#define VER_CLUSTERES 0
-#define VER_TRAYECTORIA 0 
-#define KALMAN 0
-#define VIEWER_3D 0
-#define LaneletFilter 0
-#define DEBUG 0
+#define lanelet_filter 1
 
 #define PI  3.1415926
 #define THMIN     10.0
@@ -142,8 +127,6 @@ Simulation
 #define INSIDE 0
 #define OUTSIDE 1
 
-#define TIME_PRECISION_TRACKING 1.5
-
 // End Defines //
 
 
@@ -155,46 +138,7 @@ typedef struct
 	double y; // y UTM with respect to the map origin
 }Area_Point;
 
-typedef struct Kalman_Points_History
-{
-	// Store up to 10 measurements on each Kalman filter
-	
-	// Position of the obstacle
-	double x[10];
-	double y[10];
-	double z[10];
-
-	// Dimensions of the obstacle
-	double w[10];
-	double h[10];
-	double d[10];
-
-	// Prediction of the obstacle
-	double predicted_x[10];
-	double predicted_y[10];
-	double predicted_z[10];
-	double time[10];
-	string type;
-}kalman_points_history;
-
-typedef struct Points_Kalman
-{
-	double x;
-	double y;
-	double z;
-	double w;
-	double h;
-	double d;
-	string type;
-}points_kalman;
-
-typedef struct Points
-{
-	int x;
-	int z;
-}points[100];
-
-struct Object
+typedef struct
 {
 	float centroid_x; // Local centroid (with respect to the "base_link" frame)
 	float centroid_y;
@@ -202,39 +146,13 @@ struct Object
 	float global_centroid_x; // Global centroid (with respect to the "map" frame)
 	float global_centroid_y;
 	float global_centroid_z;
+    float w;
+    float h;
+    float d;
 	double r;
 	double g;
 	double b;
-	float x_min;
-	float y_min;
-	float z_min;
-	float x_max;
-	float y_max;
-	float z_max;
-	float w;
-	float h;
-	float d;
-	pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud;
-	string type;
-	int id;
-	int pedestrian_state; // If the object is a pedestrian, store its state
-}object;
-
-struct Merged_Object
-{
-	int cluster[10];
-	float centroid_x; // Local centroid (with respect to the "base_link" frame)
-	float centroid_y;
-	float centroid_z;
-	float global_centroid_x; // Global centroid (with respect to the "map" frame)
-	float global_centroid_y;
-	float global_centroid_z;
-	float w;
-	float h;
-	float d;
-	double r;
-	double g;
-	double b;
+    double a;
 	float x_min;
 	float y_min;
 	float z_min;
@@ -244,42 +162,26 @@ struct Merged_Object
 	pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud;
 	string type;
 	int id;
-};
+    double time;
+}Object;
 
-struct Cluster
-{       
-	int cluster[10];
-	int repetitions;
-	float centroid_x[10];
-	float centroid_y[10];
-	float centroid_z[10];
-	double r;
-	double g;
-	double b;
-	float x_min;
-	float y_min;
-	float z_min;
-	float x_max;
-	float y_max;
-	float z_max;
-	float w;
-	float h;
-	float d;
-	int id;
-}cluster;
-
-struct Precision_Trackers
+typedef struct 
 {
-	int id;
+    float w;
+    float h;
+    float d;
+	float global_centroid_x; // Global coordinates (w.r.t. "map" frame)
+	float global_centroid_y;
+    float local_centroid_x; // Local coordinates (w.r.t. "base_link" frame)
+    float local_centroid_y; 
+	int object_id; // VOT (Visual Object Tracking) assigned ID
+    string type;
 	double time;
-	Eigen::Vector3f centroid; // x, y, z position
-	Eigen::Vector3f previous_centroid;
-	Eigen::Vector3f previous_velocity;
-	Eigen::Vector3f estimated_velocity; // x, y, z speed
-	Eigen::Vector3f size; // Height, Width, Depth
-	string type;
-	int pedestrian_state;
-}precision_trackers;
+	double yaw;
+    int pedestrian_state;
+    int stop_state;
+    int give_way_state;
+}Merged_Object;
 
 // End Structures //
 
@@ -418,23 +320,11 @@ geographic_msgs::GeoPoint geo_origin;
 
 cv::Mat imgProjection;
 vector<std_msgs::ColorRGBA> colours;
-
-vector<Object> only_laser_objects, merged_objects, output_objects;
-//vector<Tracking_Points> tracking_points, tracking_points_prev, tracking_points_aux, tracking_points_lidar, tracking_points_prev_lidar, tracking_points_aux_lidar;
-vector<Precision_Trackers> pTrackers;
-vector<cv::KalmanFilter> kfs;
-vector<int> kfsTime;
-precision_tracking::Params params;
-Eigen::Vector3f estimated_velocity;
-vector<precision_tracking::Tracker> trackers;
-int indexpTrackers = 0;
-int flag_tracking_points = 0;
-int number_of_clusters = 0; // Number of clusters after the first filter
-
+vector<Merged_Object> merged_objects;
 Area_Point polygon_area[] = {0,0,
-			     0,0,
-			     0,0,
-			     0,0};
+                             0,0,
+                             0,0,
+                             0,0};
 
 int Number_of_sides = 4; // Of the area you have defined. Here is a rectangle, so area[] has four rows
 
@@ -445,24 +335,16 @@ int Number_of_sides = 4; // Of the area you have defined. Here is a rectangle, s
 
 // General use functions
 
-geometry_msgs::Point32 Global_To_Local_Coordinates(geometry_msgs::PointStamped );
 geometry_msgs::Point32 Local_To_Global_Coordinates(geometry_msgs::PointStamped );
 float get_Centroids_Distance(pcl::PointXYZ , pcl::PointXYZ );
 void Inside_Polygon(Area_Point *, int , Area_Point, bool &);
 void Obstacle_in_Lanelet(pcl::PointCloud<pcl::PointXYZRGB>::Ptr , geometry_msgs::PointStamped , geometry_msgs::Point32 , geometry_msgs::PointStamped , geometry_msgs::PointStamped , geometry_msgs::PointStamped , geometry_msgs::PointStamped , ros::Time , sec_msgs::Lanelet );
 
-// Kalman functions
-
-cv::KalmanFilter initKalman(float, float, float, float, float, float, float, float, float, float, float, float, float );
-void updateKalman(cv::KalmanFilter &, float , float , float , float , float , float , bool );
-Points_Kalman getKalmanPrediction(cv::KalmanFilter );
-
 // Point Cloud filters
 
 pcl::PointCloud<pcl::PointXYZRGB> xyz_filter(pcl::PointCloud<pcl::PointXYZRGB>::Ptr );
 pcl::PointCloud<pcl::PointXYZRGB> angle_filter(pcl::PointCloud<pcl::PointXYZRGB>::Ptr );
-void cluster_filter (pcl::PointCloud<pcl::PointXYZRGB>::Ptr , float , int , int , vector<Object> *, int *);
-void segmentation_filter (pcl::PointCloud<pcl::PointXYZRGB>::Ptr , float , float , float , float , float , float , float , int , int , vector<Object> *, int *, string);
+void cluster_filter(pcl::PointCloud<pcl::PointXYZRGB>::Ptr , float , int , int , vector<Object> *, int *);
 vector<Merged_Object> merging_z(vector<Object> );
 
 // Cluster functions
@@ -474,8 +356,7 @@ vector<Merged_Object> merging_z(vector<Object> );
 void route_cb(const sec_msgs::Route::ConstPtr& );
 void waiting_cb(const std_msgs::Empty );
 void regelement_cb(const sec_msgs::RegElem::ConstPtr& , const sec_msgs::Route::ConstPtr& );
-//void sensor_fusion_and_monitors_cb(ESPECIFICAR);
-void clustering_precision_tracking_monitors_cb(const sensor_msgs::PointCloud2::ConstPtr& , const nav_msgs::Odometry::ConstPtr& );
+void sensor_fusion_and_monitors_cb(const sensor_msgs::PointCloud2::ConstPtr& , const t4ac_msgs::BEV_trackers_list::ConstPtr& , const nav_msgs::Odometry::ConstPtr& );
 
 // End Declarations of functions //
 
@@ -491,8 +372,8 @@ int main (int argc, char ** argv)
 
 	// Map origin latitude and longitude by parameters
 
-    	nh.param<double>("/lat_origin",lat_origin,40.5126566);
-    	nh.param<double>("/lon_origin",lon_origin,-3.34460735);
+    nh.param<double>("/lat_origin",lat_origin,40.5126566);
+    nh.param<double>("/lon_origin",lon_origin,-3.34460735);
 
 	// Initialize origin of the map
 
@@ -535,25 +416,20 @@ int main (int argc, char ** argv)
 	message_filters::Subscriber<sec_msgs::Distance> regelemDist_sub_; // Distance to regulatory elements
 	message_filters::Subscriber<sensor_msgs::PointCloud2> cloud_sub_; // Coloured LiDAR point cloud
 	message_filters::Subscriber<sensor_msgs::PointCloud2> velodyne_cloud_sub_; // LiDAR point cloud
-	message_filters::Subscriber<nav_msgs::Odometry> odom_sub_; // Odometry
-	message_filters::Subscriber<yolov3_centernet_ros::yolo_list> vision_sub_; // Detection and Tracking with camera (CenterNet + Deep Sort + YOLO)
-        message_filters::Subscriber<carla_msgs::CarlaObjectLocationList> carla_sub_; 
+	message_filters::Subscriber<nav_msgs::Odometry> ego_vehicle_pose_sub_; // Odometry
+	message_filters::Subscriber<t4ac_msgs::BEV_trackers_list> projected_vot_; // Detection and Tracking with camera (CenterNet + Deep Sort)
 
 	regelem_sub_.subscribe(nh, "/currentRegElem", 1);
 	regelemLanelet_sub_.subscribe(nh, "/monitorizedLanelets", 1);
 	cloud_sub_.subscribe(nh, "/velodyne_coloured", 1); // Colored point cloud (based on semantic segmentation)
 	velodyne_cloud_sub_.subscribe(nh, "/velodyne_points", 1);
-	odom_sub_.subscribe(nh, "/carla/ego_vehicle/odometry", 1); // Note that in CARLA, each dynamic object has its own odometry topic. /odom has all objects odometries
-	waiting_sub = nh.subscribe<std_msgs::Empty>("/waitingAtStop", 1, &waiting_cb);
+    ego_vehicle_pose_sub_.subscribe(nh, "t4ac/localization/pose", 1)
+	projected_vot_.subscribe(nh, "/t4ac/perception/tracked_obstacles_list", 1);
+
+    waiting_sub = nh.subscribe<std_msgs::Empty>("/waitingAtStop", 1, &waiting_cb);
 	route_sub = nh.subscribe<sec_msgs::Route>("/route", 1, &route_cb);
-	//vision_sub_.subscribe(nh, "/yolov3_tracking_list", 1);
-        //carla_sub_.subscribe(nh, "/carla/hero/location_list", 1); 
 
-	//carla_sub_ = nh.subscribe<carla_msgs::CarlaObjectLocation>("/carla/hero/location", 1, &Procesar_carla_cb); 
-
-        //yolo_sub_ = nh.subscribe<nav_msgs::Path>("/yolov3_tracking_list", 1, &Procesar_yolo_cb);
-
-        // End Subscribers //
+    // End Subscribers //
 
 	// Callbacks //
 
@@ -563,25 +439,18 @@ int main (int argc, char ** argv)
 	message_filters::Synchronizer<MySyncPolicy> sync_(MySyncPolicy(10), regelem_sub_, regelemLanelet_sub_);
 	sync_.registerCallback(boost::bind(&regelement_cb, _1, _2));
 
-	/*// Callback 2: Synchronize LiDAR point cloud and camera information (including detection and tracking) (Approximate time)
+	// Callback 2: Synchronize LiDAR point cloud and camera information (including detection and tracking). Evaluate monitors (Approximate time)
 
-	typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::PointCloud2, yolov3_centernet_ros::yolo_list> MySyncPolicy2;
-	message_filters::Synchronizer<MySyncPolicy2> sync2_(MySyncPolicy2(200), velodyne_cloud_sub_, vision_sub_);
-	sync2_.registerCallback(boost::bind(&sensor_fusion_and_monitors_cb, _1, _2));*/
-
-	// Callback 2: Synchonize LiDAR point cloud and ego-vehicle odometry. Perform tracking and monitors (Approximate time)
-
-	typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::PointCloud2, nav_msgs::Odometry> MySyncPolicy2;
-	message_filters::Synchronizer<MySyncPolicy2> sync2_(MySyncPolicy2(100), cloud_sub_, odom_sub_);
-	sync2_.registerCallback(boost::bind(&clustering_precision_tracking_monitors_cb, _1, _2));
+	typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::PointCloud2, t4ac_msgs::BEV_trackers_list, nav_msgs::Odometry> MySyncPolicy2;
+	message_filters::Synchronizer<MySyncPolicy2> sync2_(MySyncPolicy2(200), velodyne_cloud_sub_, vision_sub_, ego_vehicle_pose_sub_);
+	sync2_.registerCallback(boost::bind(&sensor_fusion_and_monitors_cb, _1, _2, _3));
 
 	// Load map
 
 	string map_frame = "";
-	//string map_path = ros::package::getPath("sec_map_manager") + "/maps/uah_lanelets_v42.osm"; // Load this path if /map_path argument does not exit in the network
-	string map_path = ros::package::getPath("sec_map_manager") + "/maps/Town03_CARLA.osm";
+	string map_path = ros::package::getPath("sec_map_manager") + "/maps/uah_lanelets_v42.osm";
 
-        nh.param<string>("/map_path", map_path, map_path);
+    nh.param<string>("/map_path", map_path, map_path);
 	loadedMap = make_shared<LaneletMap>(map_path);
 
 	// Initialize colours
@@ -681,7 +550,6 @@ int main (int argc, char ** argv)
 	// ROS Spin
 
 	ros::spin ();
-
 }
 
 // End Main //
@@ -690,35 +558,6 @@ int main (int argc, char ** argv)
 // Definitions of functions // 
 
 // General use functions 
-
-// Transform global coordinates ("map" frame) to local coordinates ("base_link" frame)
-geometry_msgs::Point32 Global_To_Local_Coordinates(geometry_msgs::PointStamped point_global)
-{
-	// Parameters:
-	// point_global: geometry_msgs::PointStamped point in global coordinate (with respect to the "map" frame)
-
-	// Returns this point in local coordinates (with respect to the "base_link" frame)
-
-	tf::Vector3 aux, aux2;
-	geometry_msgs::PointStamped point_local;
-	geometry_msgs::Point32 point32_local;
-
-	aux.setX(point_global.point.x);
-	aux.setY(point_global.point.y);
-	aux.setZ(point_global.point.z);
-
-	aux2 = transformBaseLinkOdom * aux;
-
-	point_local.point.x = aux2.getX();
-	point_local.point.y = aux2.getY();
-	point_local.point.z = aux2.getZ();
-
-	point32_local.x = point_local.point.x;
-	point32_local.y = point_local.point.y;
-	point32_local.z = point_local.point.z;
-
-	return(point32_local);
-}
 
 geometry_msgs::Point32 Local_To_Global_Coordinates(geometry_msgs::PointStamped point_local)
 {
@@ -862,181 +701,6 @@ void Obstacle_in_Lanelet(pcl::PointCloud<pcl::PointXYZ>::Ptr ObstaclesInLanelet_
 	ObstaclesInLanelet_Ptr->points.push_back(pointaux);
 }
 
-// Kalman functions
-
-// Initialize a Kalman filter and put the initial values in the matrices used by the algorithm
-cv::KalmanFilter initKalman(float x, float y, float z, float w, float h, float d, float sigmaR1, float sigmaR2, float sigmaR3, float sigmaQ1, float sigmaQ2, float sigmaQ3, float sigmaP)
-{
-	// Parameters:
-	// x, y, z: Centroid of the object
-	// w, h, d: Dimensions of the object
-	// sigmaR1, sigmaR2, sigmaR3: Error Noise Covariance
-	// sigmaQ1, sigmaQ2, sigmaQ3: Process Noise Covariance
-	// sigmaP: Error Posterior Matrix
-
-	// Creates Kalman Filter with 6 measures
-
-	cv::KalmanFilter kf(12,6,0); // (int dynamParams, int measureParams, int controlParams = 0)
-	
-	// dynamParams: Dimensionality of the state
-	// measureParams: Dimensionality of the measurement
-	// controlParams: Dimensionality of the control vector
-	// type: Type of the created matrices that should be CV_32F (by default) or CV_64F
-
-	// Transition matrix
-	
-	kf.transitionMatrix = (cv::Mat_<float>(12,12) << 1,0,0,0,0,0,1,0,0,0,0,0,
-	0,1,0,0,0,0,0,1,0,0,0,0,
-	0,0,1,0,0,0,0,0,1,0,0,0,
-	0,0,0,1,0,0,0,0,0,1,0,0,
-	0,0,0,0,1,0,0,0,0,0,1,0,
-	0,0,0,0,0,1,0,0,0,0,0,1,
-	0,0,0,0,0,0,1,0,0,0,0,0,
-	0,0,0,0,0,0,0,1,0,0,0,0,
-	0,0,0,0,0,0,0,0,1,0,0,0,
-	0,0,0,0,0,0,0,0,0,1,0,0,
-	0,0,0,0,0,0,0,0,0,0,1,0,
-	0,0,0,0,0,0,0,0,0,0,0,1);
-
-	// Measurement matrix
-
-	kf.measurementMatrix = (cv::Mat_<float>(6,12) << 1,0,0,0,0,0,0,0,0,0,0,0,
-	0,1,0,0,0,0,0,0,0,0,0,0,
-	0,0,1,0,0,0,0,0,0,0,0,0,
-	0,0,0,1,0,0,0,0,0,0,0,0,
-	0,0,0,0,1,0,0,0,0,0,0,0,
-	0,0,0,0,0,1,0,0,0,0,0,0);
-
-	// Process noise covariance
-
-	kf.processNoiseCov = (cv::Mat_<float>(12,12) << sigmaQ1,0,0,0,0,0,0,0,0,0,0,0,
-	0,sigmaQ1,0,0,0,0,0,0,0,0,0,0,
-	0,0,sigmaQ2,0,0,0,0,0,0,0,0,0,
-	0,0,0,sigmaQ2,0,0,0,0,0,0,0,0,
-	0,0,0,0,sigmaQ3,0,0,0,0,0,0,0,
-	0,0,0,0,0,sigmaQ3,0,0,0,0,0,0,
-	0,0,0,0,0,0,sigmaQ1,0,0,0,0,0,
-	0,0,0,0,0,0,0,sigmaQ1,0,0,0,0,
-	0,0,0,0,0,0,0,0,sigmaQ2,0,0,0,
-	0,0,0,0,0,0,0,0,0,sigmaQ2,0,0,
-	0,0,0,0,0,0,0,0,0,0,sigmaQ3,0,
-	0,0,0,0,0,0,0,0,0,0,0,sigmaQ3);
-
-	// Measurement noise covariance
-
-	kf.measurementNoiseCov = (cv::Mat_<float>(6,6) << sigmaR1,0,0,0,0,0,
-	0,sigmaR1,0,0,0,0,
-	0,0,sigmaR2,0,0,0,
-	0,0,0,sigmaR2,0,0,
-	0,0,0,0,sigmaR3,0,
-	0,0,0,0,0,sigmaR3);
-
-	// Error posterior matrix
-
-	kf.errorCovPost = (cv::Mat_<float>(12,12) << sigmaP,0,0,0,0,0,0,0,0,0,0,0,
-	0,sigmaP,0,0,0,0,0,0,0,0,0,0,
-	0,0,sigmaP,0,0,0,0,0,0,0,0,0,
-	0,0,0,sigmaP,0,0,0,0,0,0,0,0,
-	0,0,0,0,sigmaP,0,0,0,0,0,0,0,
-	0,0,0,0,0,sigmaP,0,0,0,0,0,0,
-	0,0,0,0,0,0,sigmaP,0,0,0,0,0,
-	0,0,0,0,0,0,0,sigmaP,0,0,0,0,
-	0,0,0,0,0,0,0,0,sigmaP,0,0,0,
-	0,0,0,0,0,0,0,0,0,sigmaP,0,0,
-	0,0,0,0,0,0,0,0,0,0,sigmaP,0,
-	0,0,0,0,0,0,0,0,0,0,0,sigmaP);
-
-	// Initialize filter with given data
-
-	// State post: Corrected state (x(k)): x(k) = x'(k)+K(k)*(z(k)-H*x'(k))
-
-	kf.statePost.at<float>(0) = x;
-	kf.statePost.at<float>(1) = y;
-	kf.statePost.at<float>(2) = z;
-	kf.statePost.at<float>(3) = w;
-	kf.statePost.at<float>(4) = h;
-	kf.statePost.at<float>(5) = d;
-	kf.statePost.at<float>(6) = 0;
-	kf.statePost.at<float>(7) = 0;
-	kf.statePost.at<float>(8) = 0;
-	kf.statePost.at<float>(9) = 0;
-	kf.statePost.at<float>(10) = 0;
-	kf.statePost.at<float>(11) = 0;
-	
-	// State Pre: Predicted state (x'(k)): x(k) = A*x(k-1)+B*u(k)
-	 
-	kf.statePre.at<float>(0) = x;
-	kf.statePre.at<float>(1) = y;
-	kf.statePre.at<float>(2) = z;
-	kf.statePre.at<float>(3) = w;
-	kf.statePre.at<float>(4) = h;
-	kf.statePre.at<float>(5) = d;
-	 
-	return kf;
-}
-
-// Update Kalman filter
-void updateKalman(cv::KalmanFilter &kf, float x, float y, float z, float w, float h, float d, bool useMeasurement)
-{
-	// Parameters:
-	// kf: Kalman filter calculated in initKalman
-	// x, y, z: Center of the obstacle
-	// w, h, d: Dimensions of the object
-	// useMeasurement: If true, use measurements. If false, use previous prediction
-
-	cv::Mat prediction; // cv::Mat n-dimensional dense array class
-	cv::Mat measurement(6,1,CV_32FC1);
-
-	// Kalman prediction
-
-	prediction = kf.predict(); // predict Public member function computes a predicted state
-
-	if (useMeasurement == false) // Use as measurements the previous prediction
-	{
-		measurement.at<float>(0) = kf.statePre.at<float>(0);
-		measurement.at<float>(1) = kf.statePre.at<float>(1);
-		measurement.at<float>(2) = kf.statePre.at<float>(2);
-		measurement.at<float>(3) = kf.statePre.at<float>(3);
-		measurement.at<float>(4) = kf.statePre.at<float>(4);
-		measurement.at<float>(5) = kf.statePre.at<float>(5);
-	}
-	else // Use as measurements the current measurements
-	{
-		measurement.at<float>(0) = x;
-		measurement.at<float>(1) = y;
-		measurement.at<float>(2) = z;
-		measurement.at<float>(3) = w;
-		measurement.at<float>(4) = h;
-		measurement.at<float>(5) = d;
-	}
-
-	// Correct the Kalman filter based on the measurements
-
-	// They current measurements are usually used as cv::Mat measurements matrix since it is usually better to correct
-	// the Kalman filter based on the measurements of a good sensor rather than on the prediction
-
-	kf.correct(measurement); 
-}
-
-// Obtain a Kalman prediction for each object
-Points_Kalman getKalmanPrediction(cv::KalmanFilter kf)
-{
-	// Parameters
-	// kf: Kalman Filter
-	
-	// Returns the prediction in Kalman Points format
-
-	Points_Kalman predicted_object;
-
-	predicted_object.x = kf.statePre.at<float>(0);
-	predicted_object.y = kf.statePre.at<float>(1);
-	predicted_object.z = kf.statePre.at<float>(2);
-	predicted_object.w = kf.statePre.at<float>(3);
-	predicted_object.h = kf.statePre.at<float>(4);
-	predicted_object.d = kf.statePre.at<float>(5);
-
-	return predicted_object;
-}
 
 // Point Cloud functions
 
@@ -1099,54 +763,19 @@ pcl::PointCloud<pcl::PointXYZRGB> angle_filter(pcl::PointCloud<pcl::PointXYZRGB>
 }
 
 // Extract clusters from the coloured XYZ filtered LiDAR point cloud according to the input cluster parameters
-void cluster_filter(pcl::PointCloud<pcl::PointXYZRGB>::Ptr filtered_cloud, float tolerance, int min_cluster, int max_cluster, vector<Object> *output_objects, int *output_objects_number)
+void cluster_filter(pcl::PointCloud<pcl::PointXYZRGB>::Ptr filtered_cloud, float tolerance, int min_cluster, int max_cluster, vector<Object> *output_objects, int *number_output_objects)
 {
 	// Parameters:
-	// filtered_cloud: Coloured XYZ filtered LiDAR point cloud that contains the clusters
+	// filtered_cloud: XYZ and angle filtered LiDAR point cloud that contains the clusters
 	// tolerance: Tolerance of clusters
 	// min_cluster: Minimum size of a cluster
 	// max_cluster: Maximum size of a cluster
-	// output_objects: Pointer that points to the array that contains the clusters
-	// output_objects_number: Number of objects
+	// only_laser_objects: Pointer that points to the array that contains the clusters
+	// only_laser_objects_number: Number of objects
 
-	// This function only takes into account the size of the clusters, not its colour
+	// This function only takes into account the size of the clusters
 
-}
-
-// Extract clusters from the coloured XYZ angle filtered LiDAR point cloud according to the input cluster parameters
-void segmentation_filter(pcl::PointCloud<pcl::PointXYZRGB>::Ptr filtered_cloud, float r_max, float r_min, float g_max, float g_min, float b_max, float b_min, float tolerance, int min_cluster, int max_cluster, vector<Object> *output_objects, int *number_output_objects, string type)
-{
-	// Parameters
-	// filtered_cloud: Coloured XYZ angle filtered LiDAR point cloud that contains the clusters
-	// r_max, r_min, g_max, g_min, b_min, b_max: RGB colour limits (0 - 255)
-	// tolerance: Tolerance of clusters
-	// min_cluster: Minimum size of cluster
-	// max_cluster: Maximum size of cluster
-	// output_objects: Obtained clusters
-	// number_output_objects: Number of obtained clusters
-
-	// Delete points that are not between the colour limits
-
-	pcl::ConditionAnd<pcl::PointXYZRGB>::Ptr color_cond (new pcl::ConditionAnd<pcl::PointXYZRGB> ());
-	color_cond->addComparison (pcl::PackedRGBComparison<pcl::PointXYZRGB>::Ptr (new pcl::PackedRGBComparison<pcl::PointXYZRGB> ("r", pcl::ComparisonOps::LT, r_max)));
-	color_cond->addComparison (pcl::PackedRGBComparison<pcl::PointXYZRGB>::Ptr (new pcl::PackedRGBComparison<pcl::PointXYZRGB> ("r", pcl::ComparisonOps::GT, r_min)));
-	color_cond->addComparison (pcl::PackedRGBComparison<pcl::PointXYZRGB>::Ptr (new pcl::PackedRGBComparison<pcl::PointXYZRGB> ("g", pcl::ComparisonOps::LT, g_max)));
-	color_cond->addComparison (pcl::PackedRGBComparison<pcl::PointXYZRGB>::Ptr (new pcl::PackedRGBComparison<pcl::PointXYZRGB> ("g", pcl::ComparisonOps::GT, g_min)));
-	color_cond->addComparison (pcl::PackedRGBComparison<pcl::PointXYZRGB>::Ptr (new pcl::PackedRGBComparison<pcl::PointXYZRGB> ("b", pcl::ComparisonOps::LT, b_max)));
-	color_cond->addComparison (pcl::PackedRGBComparison<pcl::PointXYZRGB>::Ptr (new pcl::PackedRGBComparison<pcl::PointXYZRGB> ("b", pcl::ComparisonOps::GT, b_min)));
-
-	pcl::ConditionalRemoval<pcl::PointXYZRGB> condrem;
-	condrem.setCondition(color_cond);
-	condrem.setInputCloud (filtered_cloud);
-	condrem.setKeepOrganized(false);
-	condrem.filter (*filtered_cloud);
-
-	if (DEBUG)
-	{
-		cout<<"Point Cloud RGB after filtering has: "<<filtered_cloud->points.size()<<" data points"<<endl;
-	}
-
-	// Extract clusters from point cloud
+    // Extract clusters from point cloud
 
 	pcl::search::KdTree<pcl::PointXYZRGB>::Ptr tree (new pcl::search::KdTree<pcl::PointXYZRGB>);
 	tree->setInputCloud (filtered_cloud);
@@ -1159,7 +788,7 @@ void segmentation_filter(pcl::PointCloud<pcl::PointXYZRGB>::Ptr filtered_cloud, 
 	ec.setInputCloud (filtered_cloud);
 	ec.extract (cluster_indices);
 
-	// Store the clusters
+    // Store the clusters
 
 	for (vector<pcl::PointIndices>::const_iterator it = cluster_indices.begin(); it != cluster_indices.end(); ++it)
 	{
@@ -1186,9 +815,6 @@ void segmentation_filter(pcl::PointCloud<pcl::PointXYZRGB>::Ptr filtered_cloud, 
 		float centroid_x = -INFINITY;
 		float centroid_y = -INFINITY;
 		float centroid_z = -INFINITY;
-		float length_x = -INFINITY;
-		float width_y = -INFINITY;
-		float height_z = -INFINITY;
  
 		for (int i = 0; i < cloud_cluster->points.size(); i++)
 		{
@@ -1222,9 +848,9 @@ void segmentation_filter(pcl::PointCloud<pcl::PointXYZRGB>::Ptr filtered_cloud, 
 
 		// Centroid
 
-		//centroid_x = (x_max+x_min)/2.0;
-		//centroid_y = (y_max+y_min)/2.0;
-		//centroid_z = (z_max+z_min)/2.0;
+		centroid_x = (x_max+x_min)/2.0;
+		centroid_y = (y_max+y_min)/2.0;
+		centroid_z = (z_max+z_min)/2.0;
 
 		Eigen::Vector4f centroid;
 		pcl::compute3DCentroid(*cloud_cluster,centroid);
@@ -1237,43 +863,59 @@ void segmentation_filter(pcl::PointCloud<pcl::PointXYZRGB>::Ptr filtered_cloud, 
 		local_centroid.point.z = centroid_z;
 
 		global_centroid = Local_To_Global_Coordinates(local_centroid);
- 
-		// Object measurements
 
-		object.x_max = x_max;
-		object.x_min = x_min;
-		object.y_max = y_max;
-		object.y_min = y_min;
-		object.z_max = z_max;
-		object.z_min = z_min;
+        // Lanelet filter //
 
-		// Local coordinates with respect to the velodyne
+        if (lanelet_filter)
+        {
+            // Lanelets filter // Only use if you are working in real mode or the rosbag has /monitorizedLanelets according to the current map 
+			// (since if you modify some node, all ID change in the map)
 
-		//object.centroid_x = centroid_x;
-		//object.centroid_y = centroid_y;
-		//object.centroid_z = centroid_z;
+            for (int j=0; j<monitorized_Lanelets.route.size(); j++)
+			{
+				sec_msgs::Lanelet lanelet = monitorized_Lanelets.route[j];
+				lanelet_ptr_t lane = loadedMap -> lanelet_by_id(lanelet.id);
 
-		object.centroid_x = centroid[0];
-		object.centroid_y = centroid[1];
-		object.centroid_z = centroid[2];
+                if (isInsideLanelet(lane, global_centroid.x, global_centroid.y, utmOrigin))
+				{
+					// Object measurements
 
-		// Cloud
+					object.x_max = x_max;
+					object.x_min = x_min;
+					object.y_max = y_max;
+					object.y_min = y_min;
+					object.z_max = z_max;
+					object.z_min = z_min;
 
-		object.cloud = cloud_cluster;
+                    object.d = x_max - x_min;
+                    object.w = y_max -y_min;
+                    object.h = z_max - z_min;
 
-		// Type
+                    object.centroid_x = centroid2[0];
+					object.centroid_y = centroid2[1];
+					object.centroid_z = centroid2[2];
 
-		object.type = type;
- 
-		output_objects->push_back(object);
- 
-		if (DEBUG)
-		{
-			 cout << "Cluster "<< number_of_clusters <<" centroid_x "<<centroid_x<<" centroid_y "<<centroid_y <<" centroid_z "<< centroid_z<<endl;
-		}
+                    // Global coordinates
 
-		*number_output_objects = *number_output_objects + 1;
-		number_of_clusters++;
+					object.centroid_global_x = global_centroid.x;
+					object.centroid_global_y = global_centroid.y;
+					object.centroid_global_z = global_centroid.z;
+
+                    // Type
+
+					object.type = "none";
+
+					// Cloud
+
+					object.cloud = cloud_cluster;
+
+					output_objects->push_back(object);
+					*number_output_objects = *number_output_objects + 1;
+
+					break; // Continue with the next object
+                }
+            }
+        }
 	}
 }
 
@@ -1287,9 +929,6 @@ vector<Merged_Object> merging_z(vector<Object> objects)
 
 	vector<Merged_Object> merged_objects;
 	merged_objects.clear();
-
-	
-
 }
 
 
@@ -1436,8 +1075,6 @@ void regelement_cb(const sec_msgs::RegElem::ConstPtr& regelem, const sec_msgs::R
 
 					//cout<<"\nSubs merging: "<<subs.c_str()<<endl;
 
-					
-						
 					if (!strcmp(subs.c_str(),"id"))
 					{	
 						string subs;
@@ -1457,7 +1094,6 @@ void regelement_cb(const sec_msgs::RegElem::ConstPtr& regelem, const sec_msgs::R
 			merging_monitor = false;
 		}
 
-	
 		// If particularly STOP
 
 		if (!strcmp(regelem->type.c_str(),"stop"))
@@ -1574,457 +1210,192 @@ void regelement_cb(const sec_msgs::RegElem::ConstPtr& regelem, const sec_msgs::R
 	}
 }
 
-void clustering_precision_tracking_monitors_cb(const sensor_msgs::PointCloud2::ConstPtr& lidar_msg, const nav_msgs::Odometry::ConstPtr& odom_msg)
+void sensor_fusion_and_monitors_cb(const sensor_msgs::PointCloud2::ConstPtr& lidar_msg, const t4ac_msgs::BEV_trackers_list::ConstPtr& bev_trackers_list_msg, const nav_msgs::Odometry::ConstPtr& ego_vehicle_pose_msg);
 {
 	cout<<"------------------------------------------------"<<endl;
-	//ROS_INFO("Time: [%lf]", (double)ros::Time::now().toSec());
+	// ROS_INFO("Time: [%lf]", (double)ros::Time::now().toSec());
 
-	// Auxiliar variables
+    // lidar_msg contains the LiDAR  information = PointCloud
+	// bev_trackers_list_msg contains the visual tracked obstacles projected onto the Bird's Eye View space
+	// ego_vehicle_pose_msg contains the ego vehicle position
 
-	std::vector<int> associated_filter;
+	// Note that if --clock is not published (if we are trying to run a rosbag), the system will not create the transforms
 
-	// Obtain the movement of the ego-vehicle in X and Y (Global coordinates) and Orientation (Yaw)
+    // Obtain transforms between frames and store
 
-	double displacement_x_global = odom_msg->pose.pose.position.x - previous_odom.pose.pose.position.x;
-	double displacement_y_global = odom_msg->pose.pose.position.y - previous_odom.pose.pose.position.y;
-	double yaw = tf::getYaw(odom_msg->pose.pose.orientation);
+    // Auxiliar variables
 
-	// Obtain displacement of the ego-vehicle and Velocities in Local coordinates
+    // ACC variables
 
-	//cout<<"Global displacement x: "<<displacement_x_global<<endl;
-	//cout<<"Global displacement y: "<<displacement_y_global<<endl;
+	double distfrontcar = 5000000;
+	std_msgs::Float64 front_car_distance;
 
-	double displacement_x_local = displacement_x_global*cos(yaw) + displacement_y_global*sin(yaw);
-	double displacement_y_local = displacement_x_global*(-sin(yaw)) + displacement_y_global*cos(yaw);
-
-	//cout<<"Local displacement x: "<<displacement_x_local<<endl;
-	//cout<<"Local displacement y: "<<displacement_y_local<<endl;
-
-	double time = odom_msg->header.stamp.toSec() - previous_odom.header.stamp.toSec();
-
-	double vel_x_with_yaw = displacement_x_local/time;
-	double vel_y_with_yaw = displacement_y_local/time;
-	double abs_vel = sqrt(pow(vel_x_with_yaw,2)+pow(vel_y_with_yaw,2));
-
-	double vel_x = displacement_x_global/time;
-	double vel_y = displacement_y_global/time;
-
-	//cout<<"My vel x: "<<vel_x<<endl;
-	//cout<<"My vel y: "<<vel_y<<endl;
-	//cout<<"My yaw: "<<yaw;
-	
-	// Store previous odometry
-
-	previous_odom = *odom_msg;
-
-	// Store odom in different formats: TODO: Required?
-
-	geodesy::UTMPoint odomUTMmsg;
-	odomUTMmsg.band = utm_origin.band;
-	odomUTMmsg.zone = utm_origin.zone;
-	odomUTMmsg.altitude = 0;
-	odomUTMmsg.easting = odom_msg->pose.pose.position.x + utm_origin.easting;
-	odomUTMmsg.northing = odom_msg->pose.pose.position.y + utm_origin.northing;
- 	geographic_msgs::GeoPoint latLonOdom;
-	latLonOdom = geodesy::toMsg(odomUTMmsg);
-
-	try
+    try
 	{
-		// Obtain transforms between frames and store
-
-		listener->lookupTransform("base_link", "ego_vehicle/camera/semantic_segmentation/semantic", lidar_msg->header.stamp, transformBaseLinkBaseCamera);
-		listener->lookupTransform("map", "base_link", lidar_msg->header.stamp, transformOdomBaseLink);
-		listener->lookupTransform("base_link", "map", lidar_msg->header.stamp, transformBaseLinkOdom);
+		listener->lookupTransform("map", "base_link", lidar_msg->header.stamp, TF_map2base_link);
 	}
 	catch(tf::TransformException& e)
 	{
-		
 		cout<<e.what();
-		return; // Exit the program
+		return; 
 	}
 
-	// Auxiliar Point Clouds
+    // Filter PointCloud //
 
-	pcl::PointCloud<pcl::PointXYZRGB>::Ptr vlp_cloud_Ptr (new pcl::PointCloud<pcl::PointXYZRGB>);
-	pcl::PointCloud<pcl::PointXYZ>::Ptr ObstaclesInLanelet_Ptr (new pcl::PointCloud<pcl::PointXYZ>); 
-	pcl::PointCloud<pcl::PointXYZ>::Ptr ObstaclesInPedestrian_Ptr (new pcl::PointCloud<pcl::PointXYZ>);
-	pcl::PointCloud<pcl::PointXYZ>::Ptr ObstaclesMerging_Ptr (new pcl::PointCloud<pcl::PointXYZ>);
-	pcl::PointCloud<pcl::PointXYZRGB>::Ptr non_filtered_cloud (new pcl::PointCloud<pcl::PointXYZRGB>);
-	pcl::PointCloud<pcl::PointXYZRGB>::Ptr xyz_filtered_cloud (new pcl::PointCloud<pcl::PointXYZRGB>);
-	pcl::PointCloud<pcl::PointXYZRGB>::Ptr aux_xyz_filtered_cloud (new pcl::PointCloud<pcl::PointXYZRGB>);
-	pcl::PointCloud<pcl::PointXYZRGB>::Ptr xyz_angle_filtered_cloud (new pcl::PointCloud<pcl::PointXYZRGB>);
+    // Auxiliar Point Clouds
 
-	pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud_cars (new pcl::PointCloud<pcl::PointXYZRGB>);
-	pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud_pedestrians (new pcl::PointCloud<pcl::PointXYZRGB>);
+	pcl::PointCloud<pcl::PointXYZRGB>::Ptr vlp_cloud (new pcl::PointCloud<pcl::PointXYZRGB>);
+	pcl::PointCloud<pcl::PointXYZRGB>::Ptr filtered_cloud (new pcl::PointCloud<pcl::PointXYZRGB>);
 
 	sensor_msgs::PointCloud2 msga;
 
-	// If full cloud is used ...
+    // If full cloud is used ...
 
-	pcl::fromROSMsg(*lidar_msg, *vlp_cloud_Ptr); // The content pointed by non_filtered_cloud will contain the content of lidar_msg
-	//pcl::fromROSMsg(*lidar_msg, *non_filtered_cloud); // The content pointed by non_filtered_cloud will contain the content of lidar_msg
+	pcl::fromROSMsg(*lidar_msg, *vlp_cloud); // The content pointed by non_filtered_cloud will contain the content of lidar_msg
 
-	// Rotate the point cloud according to /base_link frame
+    // XYZ filter
 
-	pcl::toROSMsg(*vlp_cloud_Ptr,msga);
+    pcl::PointCloud<pcl::PointXYZRGB> aux_xyz = xyz_filter(vlp_cloud);
+    *filtered_cloud = aux;
 
-	tfBaseLinkBaseCamera = tf::Transform(transformBaseLinkBaseCamera.getRotation(), transformBaseLinkBaseCamera.getOrigin()); // Transform from camera frame to LiDAR frame
+    // Angle filter
 
-	sensor_msgs::PointCloud2 aux_cloud;
+    pcl::PointCloud<pcl::PointXYZRGB> aux_angle = angle_filter(filtered_cloud);
+    *filtered_cloud = aux_angle;
 
-	pcl_ros::transformPointCloud("/base_link",transformBaseLinkBaseCamera,msga,aux_cloud);
-	pcl::fromROSMsg(aux_cloud,*non_filtered_cloud);
+    // End Filter PointCloud //
 
-	// XYZ Filter
+    // LiDAR Clustering //
 
-	pcl::PointCloud<pcl::PointXYZRGB> filtered_cloud = xyz_filter(non_filtered_cloud);
-	*xyz_filtered_cloud = filtered_cloud;
-	//xyz_filtered_cloud = non_filtered_cloud;
-	
-	// Publish as ROS message
+    vector<Object> vehicles, pedestrians, only_laser_objects;
+    int number_vehicles = 0, number_pedestrians = 0, number_only_laser_objects = 0;
 
-	sensor_msgs::PointCloud2 lidar_cloud;
-	pcl::toROSMsg(*xyz_filtered_cloud, lidar_cloud);
-	lidar_cloud.header.frame_id = "base_link"; // In addition to apply the transform between camera frame and LiDAR frame you have set the point cloud in the corresponding
-	// frame, in this case LiDAR (but z-filtered, so base_link)
-	lidar_cloud.header.stamp = lidar_msg->header.stamp;
+    cluster_filter(filtered_cloud,2,5,2000,&vehicles,number_vehicles,"vehicles");
+    cluster_filter(filtered_cloud,2,5,200,&pedestrians,number_pedestrians,"pedestrians");
 
-	pub_LiDAR_Pointcloud_Coloured_XYZ_Filtered.publish(lidar_cloud);
-
-	if (DEBUG)
+    for (int i=0; i<cars.size(); i++)
 	{
-		cerr<<"Point Cloud data: "<<non_filtered_cloud->points.size()<<" points"<<endl;
-	}
-
-	// Initialize number of clusters
-
-	number_of_clusters = 0;
-
-	// Angle filter to extract the clusters only from this portion of the point cloud (since with a single camera
-	// we do not have a whole coloured point cloud)
-
-	pcl::fromROSMsg(lidar_cloud,*aux_xyz_filtered_cloud); // Now xyz_filtered
-	pcl::PointCloud<pcl::PointXYZRGB> aux_filtered_cloud = angle_filter(aux_xyz_filtered_cloud);
-	*xyz_angle_filtered_cloud = aux_filtered_cloud;
-	//xyz_angle_filtered_cloud = aux_xyz_filtered_cloud;
-
-	// Publish as ROS message
-
-	sensor_msgs::PointCloud2 lidar_cloud2;
-	pcl::toROSMsg(*xyz_angle_filtered_cloud, lidar_cloud2);
-	lidar_cloud2.header.frame_id = "base_link";
-	lidar_cloud2.header.stamp = lidar_msg->header.stamp;
-
-	pub_LiDAR_Pointcloud_Coloured_XYZ_Angle_Filtered.publish(lidar_cloud2);
-
-	// Fill each PCL pointer with the xyz_angle_filtered_cloud to extract each corresponding object (It is possible to add more ...)
-
-	*cloud_cars = *xyz_angle_filtered_cloud;
-	*cloud_pedestrians = *xyz_angle_filtered_cloud;
-
-	// Cluster segmentation 
-
-	vector<Object> cars, pedestrians, total_objects;
-	cars.clear();
-	pedestrians.clear();
-	total_objects.clear();
-
-	int number_cars = 0, number_pedestrians = 0;
-
-	// TODO: The estimation of the centroid should be more precise! -> In the object centroid is not consistent during the time, the velocity estimation is impossible
-
-	segmentation_filter(cloud_cars, 10, -1, 10, -1, 155, 132, 2, 5, 2000, &cars, &number_cars, "car");   // Cars (CARLA) RGB: 0, 0, 142
-	segmentation_filter(cloud_pedestrians, 230, 210, 30, 10, 70, 50, 1, 5, 200, &pedestrians, &number_pedestrians, "pedestrian");   // Pedestrians (CARLA) RGB: 220, 20, 60
-
-	for (int i=0; i<cars.size(); i++)
-	{
-		total_objects.push_back(cars[i]);
+		only_laser_objects.push_back(vehicles[i]);
 	}
 
 	for (int i=0; i<pedestrians.size(); i++)
 	{
-		total_objects.push_back(pedestrians[i]);
+		only_laser_objects.push_back(pedestrians[i]);
 	}
 
-	cout<<"\nNumber of cars: "<<number_cars;
+    cout<<"\nNumber of vehicles: "<<number_vehicles;
 	cout<<"\nNumber of pedestrians: "<<number_pedestrians;
-	cout<<"\nTotal objects: "<<total_objects.size()<<endl<<endl;
+	cout<<"\nTotal objects: "<<merged_objects.size()<<endl<<endl;
 
-	// Obstacles merging and filter updates //
+    // End LiDAR Clustering //
 
-	if (number_cars != 0 || number_pedestrians != 0)
-	{
-		// Required merging_z ?
+    // BEV Projected VOT (Visual Object Tracking)
+    
+    float diff_lidar_vot = 0;
+    int object_id = 0;
 
-		// Kalman and Precision Trackers
+    for (int i=0; i<bev_trackers_list_msg->tracked_obstacles_list.size(); i++)
+    {
+        float max_diff_lidar_vot = 4; // Initialize maximum allowed difference
+        int index_most_similar = -1;
 
-		Points_Kalman point_kalman_aux, point_kalman_prediction;
+        float vot_x = float(bev_trackers_list_msg->tracked_obstacles_list[i].x);
+        float vot_y = float(bev_trackers_list_msg->tracked_obstacles_list[i].y);
 
-		pcl::PointXYZ p1, p2;
-		int i1, i2, i3;
+        geometry_msgs::PointStamped local_centroid;
+        geometry_msgs::Point32 global_centroid;
 
-		// Travel all objects
+        local_centroid.point.x = vot_x;
+        local_centroid.point.y = vot_y;
+        local_centroid.point.z = 0;
 
-		for (int i=0; i<total_objects.size(); i++)
-		{
-			point_kalman_aux.x = total_objects[i].centroid_x;
-			point_kalman_aux.y = total_objects[i].centroid_y;
-			point_kalman_aux.z = total_objects[i].centroid_z;
-			point_kalman_aux.w = total_objects[i].x_max - total_objects[i].x_min;
-			point_kalman_aux.h = total_objects[i].y_max - total_objects[i].y_min;
-			point_kalman_aux.d = total_objects[i].z_max - total_objects[i].z_min;
-			point_kalman_aux.type = total_objects[i].type;
+        global_centroid = Local_To_Global_Coordinates(local_centroid);
 
-			Eigen::Vector4f centroid;
-			pcl::compute3DCentroid(*total_objects[i].cloud,centroid);
-			p1.x = centroid[0];
-			p1.y = centroid[1];
-			p1.z = 0;
+        if (only_laser_objects.size() > 0 && (!strcmp(bev_trackers_list_msg->tracked_obstacles_list[i].type.c_str(),"car") || !strcmp(bev_trackers_list_msg->tracked_obstacles_list[i].type.c_str(),"person")))
+        {
+            double time = bev_trackers_list_msg->header.stamp.toSec();
+            object_id = bev_trackers_list_msg->tracked_obstacles_list[i].object_id;
 
-			// Associate the object with a filter
+            geometry_msgs::PointStamped local_centroid;
+			geometry_msgs::Point32 global_centroid;
 
-			float distance = 0;
-			float min_distance = 100000;
-			int minKalman = -1; // Number of Kalman filter
+			local_centroid.point.x = vot_x;
+			local_centroid.point.y = vot_y;
+			local_centroid.point.z = 0;
 
-			cout<<"Number of Kalman Filters: "<<kfs.size()<<endl;
-			cout<<"Number of Precision Trackers: "<<pTrackers.size()<<endl;
+			global_centroid = Local_To_Global_Coordinates(local_centroid);
 
-			for (int j=0; j<pTrackers.size(); j++)
-			{
-				cout<<"pTracker ID: "<<pTrackers[i].id<<endl;
+            for (int j=0; j<only_laser_objects.size(); j++)
+            {
+                float l_x = float(only_laser_objects[j].centroid_x); 
+				float l_y = float(only_laser_objects[j].centroid_y);
 
-				// If pTracker is not too old, compare
-				if ((lidar_msg->header.stamp.toSec() - pTrackers[j].time) < TIME_PRECISION_TRACKING)
+                diff_lidar_vot = float(sqrt(pow(vot_x-l_x,2)+pow(vot_y-l_y,2))); 
+
+                if (diff_lidar_vot < max_diff_lidar_vot) // Find the closest cluster
 				{
-					// Calculate the distance between the detected centroid and the predicted tracker centroid
-
-					p2.x = pTrackers[j].centroid[0] + (pTrackers[j].estimated_velocity[0]*(lidar_msg->header.stamp.toSec()-pTrackers[j].time));
-					p2.y = pTrackers[j].centroid[1] + (pTrackers[j].estimated_velocity[1]*(lidar_msg->header.stamp.toSec()-pTrackers[j].time));
-					p2.z=0;
-
-					distance = get_Centroids_Distance(p1,p2);
-
-					/*cout<<"P Tracker centroid x: "<<pTrackers[j].centroid[0]<<endl;
-					cout<<"P Tracker centroid y: "<<pTrackers[j].centroid[1]<<endl;
-					cout<<"P Tracker velocity x: "<<pTrackers[j].estimated_velocity[0]<<endl;
-					cout<<"P Tracker velocity y: "<<pTrackers[j].estimated_velocity[1]<<endl;
-					cout<<"Distance: "<<distance<<endl;*/
-
-					if ((distance < min_distance) && (distance < 5))
-					{
-						min_distance = distance;
-						minKalman = j; // Current Kalman filter associated to j-precision tracker
-
-						if (DEBUG)
-						{
-							ROS_ERROR("Obstacle %d associated to %d precision tracker\n", i, j);
-						}
-					}
+					max_diff_lidar_vot = diff_lidar_vot;
+					index_most_similar = j;
 				}
-			}
+            }
 
-			if (minKalman == -1) // Current Kalman filter is not associated with the obstacle. Create a new Kalman filter and Precision Tracker
-			{
-				// Init new Kalman Filter and add to Kalman list
-				
-				kfs.push_back(initKalman(point_kalman_aux.x, point_kalman_aux.y, point_kalman_aux.z, point_kalman_aux.w, point_kalman_aux.h, point_kalman_aux.d, 0.999, 0.999, 0.999, 0.001,0.001, 0.001, 0.01));  
-				
-				// Add "time" (Counter)
-					
-				kfsTime.push_back(20);
-				min_distance = 0;
+            if (max_diff_lidar_vot < 1.5 && index_most_similar != -1)
+            // In order to merge both information, the centroid between distance must be less that 1.5 m (VOT projected centroid and closest LiDAR centroid)
+            {
+                only_laser_objects[index_most_similar].type = bev_trackers_list_msg->tracked_obstacles_list[i].type;
+                only_laser_objects[index_most_similar].object_id = bev_trackers_list_msg->tracked_obstacles_list[i].object_id;
+				only_laser_objects[index_most_similar].r = bev_trackers_list_msg->tracked_obstacles_list[i].color.r
+				only_laser_objects[index_most_similar].g = bev_trackers_list_msg->tracked_obstacles_list[i].color.g
+				only_laser_objects[index_most_similar].b = bev_trackers_list_msg->tracked_obstacles_list[i].color.b
+				only_laser_objects[index_most_similar].a = bev_trackers_list_msg->tracked_obstacles_list[i].color.a
 
-				// Kalman filter number
+                int flag = 0;
 
-				minKalman = kfs.size() - 1; // Now it is the new one, so it has the highest number
+                // 1. Find out if current merged object was previously stored. Id does, update the object
 
-				// Precision Tracking variables
+                for (int k=0; k<merged_objects.size(); k++)
+                {
+                    if (merged_objects[k].object_id == object_id)
+                    {
+                        merged_objects[k].global_centroid_x = only_laser_objects[index_most_similar].centroid_global_x;
+                        merged_objects[k].global_centroid_y = only_laser_objects[index_most_similar].centroid_global_y;
+                        merged_objects[k].local_centroid_x = only_laser_objects[index_most_similar].centroid_x;
+                        merged_objects[k].local_centroid_y = only_laser_objects[index_most_similar].centroid_y;
 
-				double horizontal_sensor_resolution, vertical_sensor_resolution;
-				Eigen::Vector3f centroid;
-				Eigen::Vector4f centroid2;
-				pcl::compute3DCentroid(*total_objects[i].cloud,centroid2);
+                        merged_object.d = only_laser_objects[index_most_similar].d;
+                        merged_object.w = only_laser_objects[index_most_similar].w;
+                        merged_object.h = only_laser_objects[index_most_similar].h;
 
-				centroid[0] = centroid2[0];
-				centroid[1] = centroid2[1];
-				centroid[2] = centroid2[2];
+                        flag = 1;
+                        break;
+                    }
+                }
 
-				// Create Precision Tracker (Evaluate using 3D or color if the machine allows to work at correct ratio)
-
-				params.useColor = false;
-				params.use3D = false;
-				precision_tracking::Tracker tracker(&params);
-				tracker.setPrecisionTracker(boost::make_shared<precision_tracking::PrecisionTracker>(&params));
-				precision_tracking::getSensorResolution(centroid, &horizontal_sensor_resolution, &vertical_sensor_resolution);
-
-				if (DEBUG)
-				{
-					ROS_ERROR("Horizontal resolution %f Vertical resolution %f\n", horizontal_sensor_resolution, vertical_sensor_resolution);
-				}
-
-				tracker.addPoints(total_objects[i].cloud, lidar_msg->header.stamp.toSec(), horizontal_sensor_resolution, vertical_sensor_resolution, &estimated_velocity);
-
-				// Estimated velocity in absolute value (Relative velocity estimation w.r.t. the ego-vehicle + ego-vehicle velocity)
-
-				estimated_velocity[0] = estimated_velocity[0] + vel_x_with_yaw;
-				estimated_velocity[1] = estimated_velocity[1] + vel_y_with_yaw;
-
-				// Precision Trackers
-
-				trackers.push_back(tracker);
-
-				Precision_Trackers pt;
-				pt.centroid = centroid;
-				pt.estimated_velocity = estimated_velocity;
-				pt.time = lidar_msg->header.stamp.toSec();
-				pt.size[0] = fabs(total_objects[i].x_max - total_objects[i].x_min);
-				pt.size[1] = fabs(total_objects[i].y_max - total_objects[i].y_min);
-				pt.size[2] = fabs(total_objects[i].z_max - total_objects[i].z_min);
-				pt.id = indexpTrackers;
-				pt.type = total_objects[i].type;
-				pt.pedestrian_state = 0;
-				pTrackers.push_back(pt);
-
-				total_objects[i].id = indexpTrackers; // Current object ID = New precision tracker ID
-
-				associated_filter.push_back(indexpTrackers);
-				indexpTrackers++;	
-			}
-			else // if minKalman != 1, the object is already associated with a Precision Tracker filter 
-			{
-				// Update its associated Kalman filter (If true the last argument, use these measurements as correction parameters)
-
-				updateKalman(kfs[minKalman], point_kalman_aux.x, point_kalman_aux.y, point_kalman_aux.z, point_kalman_aux.w, point_kalman_aux.h, point_kalman_aux.d, true);
-
-				// Update the Precision Tracker sensor resolution 
-
-				double horizontal_sensor_resolution, vertical_sensor_resolution;
-				Eigen::Vector3f centroid;
-				Eigen::Vector4f centroid2;
-
-				pcl::compute3DCentroid(*total_objects[i].cloud,centroid2);
-				centroid[0] = centroid2[0];
-				centroid[1] = centroid2[1];
-				centroid[2] = centroid2[2];
-
-				pTrackers[minKalman].previous_centroid = pTrackers[minKalman].centroid;
-				pTrackers[minKalman].previous_velocity = pTrackers[minKalman].estimated_velocity;
-
-				precision_tracking::getSensorResolution(centroid, &horizontal_sensor_resolution, &vertical_sensor_resolution);
-
-				trackers[minKalman].addPoints(total_objects[i].cloud, lidar_msg->header.stamp.toSec(), horizontal_sensor_resolution, vertical_sensor_resolution, &estimated_velocity);
-
-				// Estimated velocity in absolute value (Relative velocity estimation w.r.t. the ego-vehicle + ego-vehicle velocity)
-
-				/*cout<<"\nObject x: "<<estimated_velocity[0]<<endl;
-				cout<<"Object y: "<<estimated_velocity[1]<<endl;
-				cout<<"\nMe x: "<<vel_x_with_yaw<<endl;
-				cout<<"Me y: "<<vel_y_with_yaw<<endl;*/
-
-				estimated_velocity[0] = estimated_velocity[0] + vel_x_with_yaw;
-				estimated_velocity[1] = estimated_velocity[1] + vel_y_with_yaw;
-
-				double pTrackerVelocity = sqrt(pow(estimated_velocity[0],2)+pow(estimated_velocity[1],2)); // Note that the pTracker stores the local velocity of the object + ego-vehicle velocity
-
-				/*if ((estimated_velocity[0] > 2*pTrackers[minKalman].previous_velocity[0]) || (estimated_velocity[0] < 0.5*pTrackers[minKalman].previous_velocity[0]) || (estimated_velocity[1] > 2*pTrackers[minKalman].previous_velocity[1]) || (estimated_velocity[0] < 0.5*pTrackers[minKalman].previous_velocity[0]))
-				{
-					estimated_velocity = pTrackers[minKalman].previous_velocity;
-				}*/
-
-				/*cout<<"\nPrecision Tracker velocity absolute velocity : "<<setprecision(2)<<pTrackerVelocity<<" km/h"<<endl;
-
-				cout<<"\nPrecision Tracker centroid x: "<<pTrackers[minKalman].centroid[0]<<endl;
-				cout<<"\nPrecision Tracker centroid y: "<<pTrackers[minKalman].centroid[1]<<endl;*/
-
-				// Update the associated Precision Tracker
-
-				p1.x = centroid[0]; // Centroid of the current object
-				p1.y = centroid[1];
-				p1.z = centroid[2];
-				p2.x = centroid[0] + (estimated_velocity[0]*10); // Predicted centroid of this object based on the estimated_velocity
-				p2.y = centroid[1] + (estimated_velocity[1]*10);
-				p2.z = centroid[2] + (estimated_velocity[2]*10);
+                // 2. If it was not previously stored, then create a new object
 	
-				pTrackers[minKalman].centroid = centroid;
-				pTrackers[minKalman].estimated_velocity = estimated_velocity;
-				pTrackers[minKalman].time = lidar_msg->header.stamp.toSec();
-				pTrackers[minKalman].size[0] = fabs(total_objects[i].x_max - total_objects[i].x_min);
-				pTrackers[minKalman].size[1] = fabs(total_objects[i].y_max - total_objects[i].y_min);
-				pTrackers[minKalman].size[2] = fabs(total_objects[i].z_max - total_objects[i].z_min);
-
-				if (strcmp(total_objects[i].type.c_str(),"none")) // If the type is not none ...
+				if (flag == 0)
 				{
-					pTrackers[minKalman].type = total_objects[i].type;
-				}
+                    Merged_Object merged_object;
 
-				associated_filter.push_back(pTrackers[minKalman].id);
+                    merged_object.global_centroid_x = only_laser_objects[index_most_similar].centroid_global_x;
+                    merged_object.global_centroid_y = only_laser_objects[index_most_similar].centroid_global_y;
+                    merged_object.local_centroid_x = only_laser_objects[index_most_similar].centroid_x;
+                    merged_object.local_centroid_x = only_laser_objects[index_most_similar].centroid_y;
 
-				total_objects[i].id = pTrackers[minKalman].id; // Current object ID = Associated precision tracker ID
+                    merged_object.d = only_laser_objects[index_most_similar].d;
+                    merged_object.w = only_laser_objects[index_most_similar].w;
+                    merged_object.h = only_laser_objects[index_most_similar].h;
 
-				total_objects[i].pedestrian_state = pTrackers[minKalman].pedestrian_state; // Associated pedestrian state (-1, 0, 1, 2, 3)
+                    merged_object.object_id = only_laser_objects[index_most_similar].object_id;
+                    merged_object.type = only_laser_objects[index_most_similar].type;
 
-				// Get Kalman Prediction. TODO: Delete? Not using right now
+                    merged_objects.push_back(merged_object);
+                }
+            }
+        }
+    }
 
-				point_kalman_prediction = getKalmanPrediction(kfs[minKalman]);
-			}
-
-			if (KALMAN)
-			{
-				double r,g,b;
-				std::stringstream ss2, ss3;
-				r = 255/255.0;
-				g = 255/255.0;
-				b = 0/255.0;
-				ss2 << "Aux Kalman cluster" << i;
-				// viewer->addCube(point_kalman_aux.x-point_kalman_aux.w/2,point_kalman_aux.x+point_kalman_aux.w/2, point_kalman_aux.y-point_kalman_aux.h/2,point_kalman_aux.y+point_kalman_aux.h/2, point_kalman_aux.z-point_kalman_aux.d/2, point_kalman_aux.z+point_kalman_aux.d/2,r,g,b,ss2.str());
-				r = 255/255.0;
-				g = 0/255.0;
-				b = 0/255.0;
-				ss3 << "Predicted Kalman cluster" << i;
-				// viewer->addCube(point_kalman_prediction.x-point_kalman_prediction.w/2,point_kalman_prediction.x+point_kalman_prediction.w/2, point_kalman_prediction.y-point_kalman_prediction.h/2,point_kalman_prediction.y+point_kalman_prediction.h/2, point_kalman_prediction.z-point_kalman_prediction.d/2, point_kalman_prediction.z+point_kalman_prediction.d/2,r,g,b,ss2.str());
-			}
-
-			if (DEBUG)
-			{
-				cout<<"\t.:Kalman cluster:."<<endl;
-				cout << "Cluster " << i << endl << " Minimum distance: "<< min_distance << endl << " Kalman filter index: "<< minKalman << endl;
-				cout << "Cluster x" << point_kalman_aux.x << " Kalman x " << point_kalman_prediction.x << " Cluster y " << point_kalman_aux.y << " Kalman y " << point_kalman_prediction.y << " Cluster z " << point_kalman_aux.z << " Kalman z " << point_kalman_prediction.z << endl;
-				cout << "Cluster w" << point_kalman_aux.w << " Kalman w " << point_kalman_prediction.w << " Cluster h " << point_kalman_aux.h << " Kalman h " << point_kalman_prediction.h << " Cluster d " << point_kalman_aux.d << " Kalman d " << point_kalman_prediction.d << endl;
-			}
-		}
-	}
-	/*else // If none obstacle is detected
-	{
-		pedestrian_crossing_occupied = 0;
-		merging_occupied = 0;
-		
-	}*/
-
-	// End Obstacles merging and filter updates //
-
-	// Decrease Kalman filter life
-
-	for (unsigned int i=0; i<kfsTime.size(); i++)
-	{
-		kfsTime[i]--; // When a Kalman filter is initialized, this value is set to 20
-	}
-
-	// Delete precision tracker if it is not update in the last TIME_PRECISION_TRACKING s (see parameter)
-
-	for (unsigned int j=0; j<pTrackers.size(); j++)
-	{
-		if ((lidar_msg->header.stamp.toSec()-pTrackers[j].time) > TIME_PRECISION_TRACKING)
-		{
-			kfsTime.erase(kfsTime.begin()+j); // Delete that element of the array
-			kfs.erase(kfs.begin()+j);
-			pTrackers.erase(pTrackers.begin()+j);
-		}
-	}
-
-	// TODO: Store the lanelet for each obstacle ?
-
-	// Monitors //
+    // Monitors //
 
 	Obstacles.obstacles.clear();
 
@@ -2041,41 +1412,37 @@ void clustering_precision_tracking_monitors_cb(const sensor_msgs::PointCloud2::C
 	// Auxiliar variables for monitors
 
 	bool pedestrian_detection = false;
-	double distance_to_front_car = 5000000;
-        std_msgs::Float64 distance_To_Front_Car;
 	sec_msgs::Obstacle front_car; 
 	string current_type = "none";
+    std_msgs::Float64 distance_to_front_car;
+    double distance_to_front_car = 5000000;
 	double distance_overtake = 0;
 
 	// Object evaluation For each detected cluster, regardingless if the obstacle is in the current lanelet //
 
-	for (unsigned int i=0; i<total_objects.size(); i++)
+	for (unsigned int i=0; i<merged_objects.size(); i++)
 	{
-		total_objects[i].w = total_objects[i].x_max - total_objects[i].x_min;
-		total_objects[i].h = total_objects[i].y_max - total_objects[i].y_min;
-		total_objects[i].d = total_objects[i].z_max - total_objects[i].z_min;
-
-		point_local.point.x = total_objects[i].centroid_x;
-		point_local.point.y = total_objects[i].centroid_y;
-		point_local.point.z = total_objects[i].centroid_z;
+		point_local.point.x = merged_objects[i].centroid_x;
+		point_local.point.y = merged_objects[i].centroid_y;
+		point_local.point.z = merged_objects[i].centroid_z;
 
 		// BEV (Bird's Eye View) of Cluster
 
 		v1 = point_local;
-		v1.point.x = total_objects[i].centroid_x + (total_objects[i].w/2);
-		v1.point.y = total_objects[i].centroid_y - (total_objects[i].h/2);
+		v1.point.x = merged_objects[i].centroid_x + (merged_objects[i].w/2);
+		v1.point.y = merged_objects[i].centroid_y - (merged_objects[i].h/2);
 
 		v2 = point_local;
-		v2.point.x = total_objects[i].centroid_x + (total_objects[i].w/2);
-		v2.point.y = total_objects[i].centroid_y + (total_objects[i].h/2);
+		v2.point.x = merged_objects[i].centroid_x + (merged_objects[i].w/2);
+		v2.point.y = merged_objects[i].centroid_y + (merged_objects[i].h/2);
 
 		v3 = point_local;
-		v3.point.x = total_objects[i].centroid_x - (total_objects[i].w/2);
-		v3.point.y = total_objects[i].centroid_y + (total_objects[i].h/2);
+		v3.point.x = merged_objects[i].centroid_x - (merged_objects[i].w/2);
+		v3.point.y = merged_objects[i].centroid_y + (merged_objects[i].h/2);
 
 		v4 = point_local;
-		v4.point.x = total_objects[i].centroid_x - (total_objects[i].w/2);
-		v4.point.y = total_objects[i].centroid_y - (total_objects[i].h/2);
+		v4.point.x = merged_objects[i].centroid_x - (merged_objects[i].w/2);
+		v4.point.y = merged_objects[i].centroid_y - (merged_objects[i].h/2);
 
 		// Transform Local to Global points. TODO: Transform local vertices to global vertices?
 
@@ -2111,41 +1478,23 @@ void clustering_precision_tracking_monitors_cb(const sensor_msgs::PointCloud2::C
 				}
 			}
 
-			if ((isInsideLanelet(lane, area_point.x, area_point.y, utm_origin) || pedestrian_crossing_monitor) && flag_monitorized == true) // We evaluate the presence of objects if
-			// they are inside the lanelet or if there is a pedestrian crossing close, so the pedestrian crossing area must be evaluated
+            // Evaluate the presence of objects in a certain lanelet or if there is a pedestrian crossing close, so the pedestrian crossing area 
+            // must be evaluated   
+			if ((isInsideLanelet(lane, area_point.x, area_point.y, utm_origin) || pedestrian_crossing_monitor) && flag_monitorized == true)
 			{
-				if (DEBUG)
-				{
-					ROS_ERROR("Obstacle %d is inside Lanelet %d", i, j);
-				}
-
 				lanelets_id[j] = lanelet.id;
 
 				// Store obstacle since is relevant to monitors/vehicle
 	
-				Obstacle_in_Lanelet(ObstaclesInLanelet_Ptr, point_local, point32_global, v1, v2, v3, v4, lidar_msg->header.stamp, lanelet);
+				//Obstacle_in_Lanelet(ObstaclesInLanelet_Ptr, point_local, point32_global, v1, v2, v3, v4, lidar_msg->header.stamp, lanelet);
 
-				// Search the associated tracker and store the relative velocity
-
-				for (int k = 0; k<pTrackers.size(); k++)
-				{
-					if (pTrackers[k].id == associated_filter[i]) // The index of associated_filter is the same that total_objects index
-					{
-						current_obstacle.twist.linear.x = pTrackers[k].estimated_velocity[0] - vel_x; // Relative velocity
-						current_obstacle.twist.linear.y = pTrackers[k].estimated_velocity[1] - vel_y;
-						// current_obstacle.twist.linear.x = pTrackers[k].estimated_velocity[0]; // Absolute velocity
-						// current_obstacle.twist.linear.x = pTrackers[k].estimated_velocity[0]; 
-
-						current_obstacle.type = pTrackers[k].type;
-						current_type = current_obstacle.type;
-
-						if (!strcmp(current_regulatory_element.type.c_str(),"pedestrian_crossing"))
-						{
-							Inside_Polygon(polygon_area,Number_of_sides,area_point,pedestrian_detection); // pedestrian_detection = 0 (Safety area occupied)
-															              // pedestrian_detection = 1 (Safety area occupied)
-						}
-					}
-				}
+                if (!strcmp(current_regulatory_element.type.c_str(),"pedestrian_crossing"))
+                {
+                    Inside_Polygon(polygon_area,Number_of_sides,area_point,pedestrian_detection); 
+                    // pedestrian_detection = 0 (Safety area occupied)
+                    // pedestrian_detection = 1 (Safety area occupied)
+                }
+	
 			}
 		}
 
@@ -2160,15 +1509,8 @@ void clustering_precision_tracking_monitors_cb(const sensor_msgs::PointCloud2::C
 
 		sec_msgs::Route lanelets;
 		sec_msgs::Lanelet lanelet_object;
-
-		visualization_msgs::Marker line_list, point_list;
 		
 		string left_border, right_border, role;
-
-		// Init markers
-
-		point_list = init_points("map","map_manager_visualization",0,0,0.0,0.0,1.0f,1.0,ros::Time::now(),0.2);
-		line_list = init_points("map","map_manager_visualization",1,1,0.0,1.0f,0.0,1.0,ros::Time::now(),0.2);
 
 		// Evaluate the monitors //
 
@@ -2181,8 +1523,6 @@ void clustering_precision_tracking_monitors_cb(const sensor_msgs::PointCloud2::C
 		{
 			if (!strcmp(current_type.c_str(),"pedestrian"))
 			{
-				//cout<<"\n\nPedestrian crossing lanelets: "<<pedestrian_crossing_lanelets.route.size()<<endl;
-
 				for (int j=0; j<pedestrian_crossing_lanelets.route.size(); j++)
 				{
 					sec_msgs::Lanelet lanelet = pedestrian_crossing_lanelets.route[j];
@@ -2193,7 +1533,7 @@ void clustering_precision_tracking_monitors_cb(const sensor_msgs::PointCloud2::C
 
 					if (pedestrian_detection) // Pedestrian detected in the safety area
 					{
-						int pedestrian_crossing_occupied = total_objects[i].pedestrian_state;
+						int pedestrian_crossing_occupied = merged_objects[i].pedestrian_state;
 
 						pointaux.x = point32_global.x;
 						pointaux.y = point32_global.y;
@@ -2243,7 +1583,7 @@ void clustering_precision_tracking_monitors_cb(const sensor_msgs::PointCloud2::C
 
 						for (int k = 0; k<pTrackers.size(); k++)
 						{	
-							if (pTrackers[k].id == total_objects[i].id)
+							if (pTrackers[k].id == merged_objects[i].id)
 							{
 								pTrackers[k].pedestrian_state = pedestrian_crossing_occupied;
 							}
@@ -2261,10 +1601,8 @@ void clustering_precision_tracking_monitors_cb(const sensor_msgs::PointCloud2::C
 		{
 			if (!strcmp(current_type.c_str(),"car"))
 			{
-				cout<<"\n\nCar and Merging monitor!"<<endl; 
 				for (int j=0; j<merging_lanelets.route.size(); j++)
 				{
-					cout<<"Merging "<<j<<" id "<<merging_lanelets.route[j].id<<endl;
 					sec_msgs::Lanelet lanelet = merging_lanelets.route[j];
 				
 					lanelet_ptr_t lane = loadedMap->lanelet_by_id(lanelet.id);
@@ -2276,8 +1614,6 @@ void clustering_precision_tracking_monitors_cb(const sensor_msgs::PointCloud2::C
 						pointaux.z = point32_global.z;
 						ObstaclesMerging_Ptr->points.push_back(pointaux);
 						merging_occupied = 1;
-							
-						cout<<"\nEstoy detectando algo"<<endl;
 					}
 				}
 			}
@@ -2433,9 +1769,9 @@ void clustering_precision_tracking_monitors_cb(const sensor_msgs::PointCloud2::C
 
 	global_pedestrian_crossing_occupied = 0;
 
-	for (int i=0; i<total_objects.size(); i++) // If at least one pedestrian is about to cross ...
+	for (int i=0; i<merged_objects.size(); i++) // If at least one pedestrian is about to cross ...
 	{
-		if (!strcmp(total_objects[i].type.c_str(),"pedestrian") && (total_objects[i].pedestrian_state == 1 || total_objects[i].pedestrian_state == 2 || total_objects[i].pedestrian_state == 3))
+		if (!strcmp(merged_objects[i].type.c_str(),"pedestrian") && (merged_objects[i].pedestrian_state == 1 || merged_objects[i].pedestrian_state == 2 || merged_objects[i].pedestrian_state == 3))
 		{
 			global_pedestrian_crossing_occupied = 1;
 		}
@@ -2460,12 +1796,9 @@ void clustering_precision_tracking_monitors_cb(const sensor_msgs::PointCloud2::C
 
 	// Merging monitor
 	// stop flag: 0 = Inactive, 1 Active (Car cannot cross the STOP), 2 Merging monitor (Car can cross the stop if merging monitor allows)
-	//cout<<"Merging monitor: "<<merging_monitor<<endl;
-	//cout<<"\nMerging occupied: "<<merging_occupied<<endl;
 
 	if (merging_monitor)
 	{
-		cout<<"\nStop flag: "<<stop<<endl;
 		std_msgs::Bool is_safe;
 		int aux = 0;
 	
@@ -2494,8 +1827,6 @@ void clustering_precision_tracking_monitors_cb(const sensor_msgs::PointCloud2::C
 				pub_Safe_Merge.publish(is_safe);
 			}
 		} 
-		
-		cout<<"Is safe: "<<aux<<endl;
 	}
 
 	// ACC monitor
@@ -2527,7 +1858,7 @@ void clustering_precision_tracking_monitors_cb(const sensor_msgs::PointCloud2::C
 	// Publish relevant obstacles and velocity visual markers //
 
 	// Publish LiDAR obstacles
-
+/*
 	Obstacles.header.frame_id = "/map"; // Global coordinates
 	Obstacles.header.stamp = lidar_msg->header.stamp;
 	
@@ -2559,11 +1890,11 @@ void clustering_precision_tracking_monitors_cb(const sensor_msgs::PointCloud2::C
 
 	points.points.clear();
 
-	for (unsigned int i=0; i<pTrackers.size(); i++)
+	for (unsigned int i=0; i<merged_objects.size(); i++)
 	{
-		if (!strcmp(pTrackers[i].type.c_str(),"pedestrian") || !strcmp(pTrackers[i].type.c_str(),"car"))
+		if (!strcmp(merged_objects[i].type.c_str(),"pedestrian") || !strcmp(pTrackers[i].type.c_str(),"car"))
 		{
-			points.type = visualization_msgs::Marker::ARROW;
+			points.type = visualization_msgs::Marker::CUBE;
 			points.id = pTrackers[i].id;
 			points.pose.position.x = pTrackers[i].centroid[0];
 			points.pose.position.y = pTrackers[i].centroid[1];
@@ -2607,8 +1938,7 @@ void clustering_precision_tracking_monitors_cb(const sensor_msgs::PointCloud2::C
 
 		}
 	}
-
-	//total_objects.clear(); // Clear all detected obstacles with the segmentation filter
+*/
 	
 	// End Publish relevant obstacles and velocity visual markers // 
 
@@ -2618,7 +1948,6 @@ void clustering_precision_tracking_monitors_cb(const sensor_msgs::PointCloud2::C
 // End Callbacks //
 
 // End Definitions of functions //
-
 
 
 
