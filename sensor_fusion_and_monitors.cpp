@@ -67,7 +67,6 @@ Simulation
 #include <tf/transform_broadcaster.h>
 
 #include <visualization_msgs/Marker.h>
-#include <rviz_visual_tools/rviz_visual_tools.h>
 
 // PCL includes
 #include <pcl/filters/passthrough.h>
@@ -90,8 +89,7 @@ Simulation
 #include <pcl/impl/point_types.hpp>
 
 // BEV Tracking includes
-#include ".h"
-#include ".h"
+#include "t4ac_msgs/BEV_trackers_list.h"
 
 // SEC (SmartElderlyCar) includes
 #include <sec_msgs/Route.h>
@@ -107,7 +105,7 @@ Simulation
 
 // Defines //
 
-#define lanelet_filter 1
+#define lanelet_filter 0
 
 #define PI  3.1415926
 #define THMIN     10.0
@@ -159,9 +157,9 @@ typedef struct
 	float x_max;
 	float y_max;
 	float z_max;
-	pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud;
+	pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
 	string type;
-	int id;
+	int object_id;
     double time;
 }Object;
 
@@ -190,7 +188,6 @@ typedef struct
 
 // ROS Publishers
 
-ros::Publisher pub_LiDAR_Pointcloud_Coloured_XYZ_Filtered;
 ros::Publisher pub_LiDAR_Pointcloud_Coloured_XYZ_Angle_Filtered;
 ros::Publisher pub_LiDAR_Obstacles;
 ros::Publisher pub_LiDAR_Obstacles_Velocity_Marker;
@@ -206,6 +203,9 @@ ros::Publisher pub_Distance_Overtake;
 ros::Subscriber monitorizedlanes_sub; // Monitorized lanelets
 ros::Subscriber route_sub; // Route
 ros::Subscriber waiting_sub; // Empty message waiting (STOP behaviour)
+ros::Subscriber test_1_sub;
+ros::Subscriber test_2_sub;
+ros::Subscriber test_3_sub;
 
 // End ROS communication //
 
@@ -214,8 +214,7 @@ ros::Subscriber waiting_sub; // Empty message waiting (STOP behaviour)
 
 // Transform variables
 
-tf::StampedTransform transformBaseLinkBaseCamera, transformOdomBaseLink, transformBaseLinkOdom, transformMaptoVelodyne, transformVelodynetoMap;				
-tf::Transform tfBaseLinkBaseCamera, tfOdomBaseLink;
+tf::StampedTransform TF_map2base_link;				
 tf::TransformListener *listener;
 
 // SEC variables
@@ -256,53 +255,6 @@ int merging_occupied;
 
 using namespace std;
 
-namespace rvt = rviz_visual_tools;
-
-namespace rviz_visual_tools
-	{
-	class RvizVisualToolsDemo 
-	{
-		private:
-		  rvt::RvizVisualToolsPtr visual_tools_;
-		  string name_;
-		public:
-		  
-		  // Constructor
-
-		  RvizVisualToolsDemo() : name_("rviz_tracking")
-		  {
-			visual_tools_.reset(new rvt::RvizVisualTools("/map", "/rviz_visual_tools"));
-			visual_tools_->loadMarkerPub();  // create publisher before waiting
-
-			// Clear messages
-			visual_tools_->deleteAllMarkers();
-			visual_tools_->enableBatchPublishing();
-		  }
-
-		  void publishLabelHelper(const Eigen::Isometry3d& pose, const string& label)
-	  	  {
-			Eigen::Isometry3d pose_copy = pose;
-			pose_copy.translation().x() -= 0.2;
-			visual_tools_->publishText(pose_copy, label, rvt::WHITE, rvt::LARGE, false);
-	  	  }
-
-		  void Show_WireFrame(geometry_msgs::Point32 location, const string label)
-		  {
-			Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
-
-			pose.translation() = Eigen::Vector3d(location.x, location.y, location.z);
-
-			double depth = PEDESTRIAN_LENGTH, width = PEDESTRIAN_WIDTH, height = PEDESTRIAN_HEIGHT;
-
-			visual_tools_->publishWireframeCuboid(pose, depth, width, height, rvt::RED);
-			
-			publishLabelHelper(pose, label);
-
-			//visual_tools_->trigger();
-		  }
-	};
-}
-
 // End Namespaces //
 
 
@@ -318,7 +270,6 @@ geographic_msgs::GeoPoint geo_origin;
 
 // General purpose variables
 
-cv::Mat imgProjection;
 vector<std_msgs::ColorRGBA> colours;
 vector<Merged_Object> merged_objects;
 Area_Point polygon_area[] = {0,0,
@@ -338,13 +289,13 @@ int Number_of_sides = 4; // Of the area you have defined. Here is a rectangle, s
 geometry_msgs::Point32 Local_To_Global_Coordinates(geometry_msgs::PointStamped );
 float get_Centroids_Distance(pcl::PointXYZ , pcl::PointXYZ );
 void Inside_Polygon(Area_Point *, int , Area_Point, bool &);
-void Obstacle_in_Lanelet(pcl::PointCloud<pcl::PointXYZRGB>::Ptr , geometry_msgs::PointStamped , geometry_msgs::Point32 , geometry_msgs::PointStamped , geometry_msgs::PointStamped , geometry_msgs::PointStamped , geometry_msgs::PointStamped , ros::Time , sec_msgs::Lanelet );
+void Obstacle_in_Lanelet(pcl::PointCloud<pcl::PointXYZ>::Ptr , geometry_msgs::PointStamped , geometry_msgs::Point32 , geometry_msgs::PointStamped , geometry_msgs::PointStamped , geometry_msgs::PointStamped , geometry_msgs::PointStamped , ros::Time , sec_msgs::Lanelet );
 
 // Point Cloud filters
 
-pcl::PointCloud<pcl::PointXYZRGB> xyz_filter(pcl::PointCloud<pcl::PointXYZRGB>::Ptr );
-pcl::PointCloud<pcl::PointXYZRGB> angle_filter(pcl::PointCloud<pcl::PointXYZRGB>::Ptr );
-void cluster_filter(pcl::PointCloud<pcl::PointXYZRGB>::Ptr , float , int , int , vector<Object> *, int *);
+pcl::PointCloud<pcl::PointXYZ> xyz_filter(pcl::PointCloud<pcl::PointXYZ>::Ptr );
+pcl::PointCloud<pcl::PointXYZ> angle_filter(pcl::PointCloud<pcl::PointXYZ>::Ptr );
+void cluster_filter(pcl::PointCloud<pcl::PointXYZ>::Ptr , float , int , int , vector<Object> *, int *);
 vector<Merged_Object> merging_z(vector<Object> );
 
 // Cluster functions
@@ -355,6 +306,9 @@ vector<Merged_Object> merging_z(vector<Object> );
 
 void route_cb(const sec_msgs::Route::ConstPtr& );
 void waiting_cb(const std_msgs::Empty );
+void test_1_cb(const t4ac_msgs::BEV_trackers_list::ConstPtr& );
+void test_2_cb(const sensor_msgs::PointCloud2::ConstPtr& );
+void test_3_cb(const nav_msgs::Odometry::ConstPtr& );
 void regelement_cb(const sec_msgs::RegElem::ConstPtr& , const sec_msgs::Route::ConstPtr& );
 void sensor_fusion_and_monitors_cb(const sensor_msgs::PointCloud2::ConstPtr& , const t4ac_msgs::BEV_trackers_list::ConstPtr& , const nav_msgs::Odometry::ConstPtr& );
 
@@ -389,7 +343,6 @@ int main (int argc, char ** argv)
 
 	// Publishers //
 
-	pub_LiDAR_Pointcloud_Coloured_XYZ_Filtered = nh.advertise<sensor_msgs::PointCloud2>("/velodyne_points_coloured_xyz_filtered", 1);
 	pub_LiDAR_Pointcloud_Coloured_XYZ_Angle_Filtered = nh.advertise<sensor_msgs::PointCloud2>("/velodyne_points_coloured_xyz_angle_filtered", 1);
 	pub_LiDAR_Obstacles = nh.advertise<sec_msgs::ObstacleArray>("/obstacles", 1, true);
 	pub_Detected_Pedestrian = nh.advertise<std_msgs::Bool>("/pedestrian",1);
@@ -421,10 +374,13 @@ int main (int argc, char ** argv)
 
 	regelem_sub_.subscribe(nh, "/currentRegElem", 1);
 	regelemLanelet_sub_.subscribe(nh, "/monitorizedLanelets", 1);
-	cloud_sub_.subscribe(nh, "/velodyne_coloured", 1); // Colored point cloud (based on semantic segmentation)
 	velodyne_cloud_sub_.subscribe(nh, "/velodyne_points", 1);
-    ego_vehicle_pose_sub_.subscribe(nh, "t4ac/localization/pose", 1)
-	projected_vot_.subscribe(nh, "/t4ac/perception/tracked_obstacles_list", 1);
+    ego_vehicle_pose_sub_.subscribe(nh, "/localization/pose", 1);
+	projected_vot_.subscribe(nh, "/t4ac/perception/tracked_obstacles", 1);
+
+    /*test_1_sub = nh.subscribe<t4ac_msgs::BEV_trackers_list>("/t4ac/perception/tracked_obstacles", 1, &test_1_cb);
+    test_2_sub = nh.subscribe<sensor_msgs::PointCloud2>("/velodyne_points", 1, &test_2_cb);
+    test_3_sub = nh.subscribe<nav_msgs::Odometry>("/localization/pose", 1, &test_3_cb);*/
 
     waiting_sub = nh.subscribe<std_msgs::Empty>("/waitingAtStop", 1, &waiting_cb);
 	route_sub = nh.subscribe<sec_msgs::Route>("/route", 1, &route_cb);
@@ -442,7 +398,7 @@ int main (int argc, char ** argv)
 	// Callback 2: Synchronize LiDAR point cloud and camera information (including detection and tracking). Evaluate monitors (Approximate time)
 
 	typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::PointCloud2, t4ac_msgs::BEV_trackers_list, nav_msgs::Odometry> MySyncPolicy2;
-	message_filters::Synchronizer<MySyncPolicy2> sync2_(MySyncPolicy2(200), velodyne_cloud_sub_, vision_sub_, ego_vehicle_pose_sub_);
+	message_filters::Synchronizer<MySyncPolicy2> sync2_(MySyncPolicy2(100), velodyne_cloud_sub_, projected_vot_, ego_vehicle_pose_sub_);
 	sync2_.registerCallback(boost::bind(&sensor_fusion_and_monitors_cb, _1, _2, _3));
 
 	// Load map
@@ -574,7 +530,7 @@ geometry_msgs::Point32 Local_To_Global_Coordinates(geometry_msgs::PointStamped p
 	aux.setY(point_local.point.y);
 	aux.setZ(point_local.point.z);
 
-	aux2 = transformOdomBaseLink * aux;
+	aux2 = TF_map2base_link * aux;
 
 	point_global.point.x = aux2.getX();
 	point_global.point.y = aux2.getY();
@@ -705,24 +661,23 @@ void Obstacle_in_Lanelet(pcl::PointCloud<pcl::PointXYZ>::Ptr ObstaclesInLanelet_
 // Point Cloud functions
 
 // Filter the input LiDAR point cloud in terms of xyz dimensions
-pcl::PointCloud<pcl::PointXYZRGB> xyz_filter(pcl::PointCloud<pcl::PointXYZRGB>::Ptr non_filtered_cloud)
+pcl::PointCloud<pcl::PointXYZ> xyz_filter(pcl::PointCloud<pcl::PointXYZ>::Ptr non_filtered_cloud)
 {
 	// Parameters:
 	// non_filtered_cloud: Input LiDAR point cloud 
 
 	// Returns a xyz filtered point cloud
 
-	pcl::PointCloud<pcl::PointXYZRGB> filtered_cloud;
+	pcl::PointCloud<pcl::PointXYZ> filtered_cloud;
 
 	for (int i=0; i<non_filtered_cloud->points.size(); i++)
 	{
-		pcl::PointXYZRGB aux_point; // A single point
+		pcl::PointXYZ aux_point; // A single point
 		aux_point = non_filtered_cloud->points[i];
 
-		// Z must be above the sidewalk. If the frame of the point cloud is /base_link, located on the floor, in order to avoid the sidewalk we must filter
-		// above 0.2 m (sidewalk height)
+		// Z must be above the sidewalk
 
-		if (aux_point.z > 0.2)
+		if (aux_point.z > -1.6)
 		{
 			filtered_cloud.points.push_back(aux_point);
 		}
@@ -732,38 +687,37 @@ pcl::PointCloud<pcl::PointXYZRGB> xyz_filter(pcl::PointCloud<pcl::PointXYZRGB>::
 }
 
 // Filter the input LiDAR point cloud in terms of angle
-pcl::PointCloud<pcl::PointXYZRGB> angle_filter(pcl::PointCloud<pcl::PointXYZRGB>::Ptr non_filtered_cloud) 
+pcl::PointCloud<pcl::PointXYZ> angle_filter(pcl::PointCloud<pcl::PointXYZ>::Ptr non_filtered_cloud) 
 {
 	// Parameters:
 	// non_filtered_cloud: Input LiDAR point cloud 
 
 	// Returns an angle filtered point cloud
 
-	pcl::PointCloud<pcl::PointXYZRGB> filtered_cloud;
+	pcl::PointCloud<pcl::PointXYZ> filtered_cloud;
 
 	float field_of_view = 80; // Out of this field of view (centered in the LiDAR) the point cloud is discarded
 
 	// Take into account the field of view (in degrees) of your camera
-
+	cout << "Input size: " << non_filtered_cloud->points.size() << endl;
 	for (int i=0; i<non_filtered_cloud->points.size(); i++)
 	{
-		pcl::PointXYZRGB aux_point; // A single point
+		pcl::PointXYZ aux_point; // A single point
 		aux_point = non_filtered_cloud->points[i];
 
-		double aux_point_angle = atan2(aux_point.x, aux_point.y); // Angle with respect to the "base_link" frame
+		double aux_point_angle = atan2(aux_point.y, aux_point.x); // Angle with respect to the "base_link" frame
 
-		if ((aux_point_angle<((field_of_view/2)*(M_PI/180))) && (aux_point_angle<((-field_of_view/2)*(M_PI/180))))
+		if ((aux_point_angle<((field_of_view/2)*(M_PI/180))) && (aux_point_angle>((-field_of_view/2)*(M_PI/180))))
 		{
 			filtered_cloud.push_back(aux_point);
 		}
-
-		filtered_cloud.push_back(aux_point);
 	}
+    cout << "Output size: " << filtered_cloud.points.size() << endl;
 	return filtered_cloud;
 }
 
 // Extract clusters from the coloured XYZ filtered LiDAR point cloud according to the input cluster parameters
-void cluster_filter(pcl::PointCloud<pcl::PointXYZRGB>::Ptr filtered_cloud, float tolerance, int min_cluster, int max_cluster, vector<Object> *output_objects, int *number_output_objects)
+void cluster_filter(pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_cloud, float tolerance, int min_cluster, int max_cluster, vector<Object> *output_objects, int *number_output_objects)
 {
 	// Parameters:
 	// filtered_cloud: XYZ and angle filtered LiDAR point cloud that contains the clusters
@@ -777,10 +731,10 @@ void cluster_filter(pcl::PointCloud<pcl::PointXYZRGB>::Ptr filtered_cloud, float
 
     // Extract clusters from point cloud
 
-	pcl::search::KdTree<pcl::PointXYZRGB>::Ptr tree (new pcl::search::KdTree<pcl::PointXYZRGB>);
+	pcl::search::KdTree<pcl::PointXYZ>::Ptr tree (new pcl::search::KdTree<pcl::PointXYZ>);
 	tree->setInputCloud (filtered_cloud);
 	vector<pcl::PointIndices> cluster_indices;
-	pcl::EuclideanClusterExtraction<pcl::PointXYZRGB> ec;
+	pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
 	ec.setClusterTolerance (tolerance); 
 	ec.setMinClusterSize (min_cluster); 
 	ec.setMaxClusterSize (max_cluster);
@@ -792,7 +746,7 @@ void cluster_filter(pcl::PointCloud<pcl::PointXYZRGB>::Ptr filtered_cloud, float
 
 	for (vector<pcl::PointIndices>::const_iterator it = cluster_indices.begin(); it != cluster_indices.end(); ++it)
 	{
-		pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud_cluster (new pcl::PointCloud<pcl::PointXYZRGB>);
+		pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_cluster (new pcl::PointCloud<pcl::PointXYZ>);
  
 		for (std::vector<int>::const_iterator pit = it->indices.begin(); pit != it->indices.end(); ++pit)
 		{
@@ -871,14 +825,19 @@ void cluster_filter(pcl::PointCloud<pcl::PointXYZRGB>::Ptr filtered_cloud, float
             // Lanelets filter // Only use if you are working in real mode or the rosbag has /monitorizedLanelets according to the current map 
 			// (since if you modify some node, all ID change in the map)
 
-            for (int j=0; j<monitorized_Lanelets.route.size(); j++)
+            for (int j=0; j<monitorized_lanelets.route.size(); j++)
 			{
-				sec_msgs::Lanelet lanelet = monitorized_Lanelets.route[j];
+				sec_msgs::Lanelet lanelet = monitorized_lanelets.route[j];
 				lanelet_ptr_t lane = loadedMap -> lanelet_by_id(lanelet.id);
+				cout << "Global centroid x: " << global_centroid.x;
+				cout << "Global centroid y: " << global_centroid.y;
 
-                if (isInsideLanelet(lane, global_centroid.x, global_centroid.y, utmOrigin))
+                if (isInsideLanelet(lane, global_centroid.x, global_centroid.y, utm_origin))
 				{
+					cout << "Is inside!" << endl;
 					// Object measurements
+
+					Object object;
 
 					object.x_max = x_max;
 					object.x_min = x_min;
@@ -891,15 +850,15 @@ void cluster_filter(pcl::PointCloud<pcl::PointXYZRGB>::Ptr filtered_cloud, float
                     object.w = y_max -y_min;
                     object.h = z_max - z_min;
 
-                    object.centroid_x = centroid2[0];
-					object.centroid_y = centroid2[1];
-					object.centroid_z = centroid2[2];
+                    object.centroid_x = centroid[0];
+					object.centroid_y = centroid[1];
+					object.centroid_z = centroid[2];
 
                     // Global coordinates
 
-					object.centroid_global_x = global_centroid.x;
-					object.centroid_global_y = global_centroid.y;
-					object.centroid_global_z = global_centroid.z;
+					object.global_centroid_x = global_centroid.x;
+					object.global_centroid_y = global_centroid.y;
+					object.global_centroid_z = global_centroid.z;
 
                     // Type
 
@@ -916,6 +875,44 @@ void cluster_filter(pcl::PointCloud<pcl::PointXYZRGB>::Ptr filtered_cloud, float
                 }
             }
         }
+		else if(x_max-x_min<4 && y_max-y_min<2) // To avoid huge group of non-sense points
+		{
+			Object object;
+
+			object.x_max = x_max;
+			object.x_min = x_min;
+			object.y_max = y_max;
+			object.y_min = y_min;
+			object.z_max = z_max;
+			object.z_min = z_min;
+
+            object.d = x_max - x_min;
+            object.w = y_max -y_min;
+            object.h = z_max - z_min;
+
+            object.centroid_x = centroid[0];
+			object.centroid_y = centroid[1];
+			object.centroid_z = centroid[2];
+
+            // Global coordinates
+
+			object.global_centroid_x = global_centroid.x;
+			object.global_centroid_y = global_centroid.y;
+			object.global_centroid_z = global_centroid.z;
+
+            // Type
+
+			object.type = "none";
+
+			// Cloud
+
+			object.cloud = cloud_cluster;
+
+			output_objects->push_back(object);
+			*number_output_objects = *number_output_objects + 1;
+
+			break; // Continue with the next object
+		}
 	}
 }
 
@@ -944,6 +941,24 @@ void route_cb(const sec_msgs::Route::ConstPtr& route_msg)
 void waiting_cb(const std_msgs::Empty msg)
 {
 	stop = 2;
+}
+
+void test_1_cb(const t4ac_msgs::BEV_trackers_list::ConstPtr& msg)
+{
+    double time = msg->header.stamp.toSec();
+	cout << "Tracked: " << time << endl;
+}
+
+void test_2_cb(const sensor_msgs::PointCloud2::ConstPtr& msg)
+{
+    double time = msg->header.stamp.toSec();
+	cout << "LiDAR: " << time << endl;
+}
+
+void test_3_cb(const nav_msgs::Odometry::ConstPtr& msg)
+{
+    double time = msg->header.stamp.toSec();
+	cout << "Pose: " << time << endl;
 }
 
 // Callback to extract information of the regeleme and monitorized_lanelets_msg topics
@@ -1210,7 +1225,7 @@ void regelement_cb(const sec_msgs::RegElem::ConstPtr& regelem, const sec_msgs::R
 	}
 }
 
-void sensor_fusion_and_monitors_cb(const sensor_msgs::PointCloud2::ConstPtr& lidar_msg, const t4ac_msgs::BEV_trackers_list::ConstPtr& bev_trackers_list_msg, const nav_msgs::Odometry::ConstPtr& ego_vehicle_pose_msg);
+void sensor_fusion_and_monitors_cb(const sensor_msgs::PointCloud2::ConstPtr& lidar_msg, const t4ac_msgs::BEV_trackers_list::ConstPtr& bev_trackers_list_msg, const nav_msgs::Odometry::ConstPtr& ego_vehicle_pose_msg)
 {
 	cout<<"------------------------------------------------"<<endl;
 	// ROS_INFO("Time: [%lf]", (double)ros::Time::now().toSec());
@@ -1221,14 +1236,44 @@ void sensor_fusion_and_monitors_cb(const sensor_msgs::PointCloud2::ConstPtr& lid
 
 	// Note that if --clock is not published (if we are trying to run a rosbag), the system will not create the transforms
 
-    // Obtain transforms between frames and store
+	// Get odom and velocity information
 
-    // Auxiliar variables
+	// Obtain the movement of the ego-vehicle in X and Y (Global coordinates) and Orientation (Yaw)
 
-    // ACC variables
+	double displacement_x_global = ego_vehicle_pose_msg->pose.pose.position.x - previous_odom.pose.pose.position.x;
+	double displacement_y_global = ego_vehicle_pose_msg->pose.pose.position.y - previous_odom.pose.pose.position.y;
+	double yaw = tf::getYaw(ego_vehicle_pose_msg->pose.pose.orientation);
 
-	double distfrontcar = 5000000;
-	std_msgs::Float64 front_car_distance;
+	// Obtain displacement of the ego-vehicle and Velocities in Local coordinates
+
+	double displacement_x_local = displacement_x_global*cos(yaw) + displacement_y_global*sin(yaw);
+	double displacement_y_local = displacement_x_global*(-sin(yaw)) + displacement_y_global*cos(yaw);
+
+	double time = ego_vehicle_pose_msg->header.stamp.toSec() - previous_odom.header.stamp.toSec();
+
+	double vel_x_with_yaw = displacement_x_local/time;
+	double vel_y_with_yaw = displacement_y_local/time;
+	double abs_vel = sqrt(pow(vel_x_with_yaw,2)+pow(vel_y_with_yaw,2));
+
+	double vel_x = displacement_x_global/time;
+	double vel_y = displacement_y_global/time;
+	
+	// Store odom in different formats: TODO: Required?
+
+	geodesy::UTMPoint odomUTMmsg;
+	odomUTMmsg.band = utm_origin.band;
+	odomUTMmsg.zone = utm_origin.zone;
+	odomUTMmsg.altitude = 0;
+	odomUTMmsg.easting = ego_vehicle_pose_msg->pose.pose.position.x + utm_origin.easting;
+	odomUTMmsg.northing = ego_vehicle_pose_msg->pose.pose.position.y + utm_origin.northing;
+ 	geographic_msgs::GeoPoint latLonOdom;
+	latLonOdom = geodesy::toMsg(odomUTMmsg);
+
+	// Store previous odometry
+
+	previous_odom = *ego_vehicle_pose_msg;
+
+	// Obtain transforms between frames and store
 
     try
 	{
@@ -1244,8 +1289,9 @@ void sensor_fusion_and_monitors_cb(const sensor_msgs::PointCloud2::ConstPtr& lid
 
     // Auxiliar Point Clouds
 
-	pcl::PointCloud<pcl::PointXYZRGB>::Ptr vlp_cloud (new pcl::PointCloud<pcl::PointXYZRGB>);
-	pcl::PointCloud<pcl::PointXYZRGB>::Ptr filtered_cloud (new pcl::PointCloud<pcl::PointXYZRGB>);
+	pcl::PointCloud<pcl::PointXYZ>::Ptr vlp_cloud (new pcl::PointCloud<pcl::PointXYZ>);
+	pcl::PointCloud<pcl::PointXYZ>::Ptr xyz_filtered_cloud (new pcl::PointCloud<pcl::PointXYZ>);
+	pcl::PointCloud<pcl::PointXYZ>::Ptr xyz_angle_filtered_cloud (new pcl::PointCloud<pcl::PointXYZ>);
 
 	sensor_msgs::PointCloud2 msga;
 
@@ -1253,15 +1299,45 @@ void sensor_fusion_and_monitors_cb(const sensor_msgs::PointCloud2::ConstPtr& lid
 
 	pcl::fromROSMsg(*lidar_msg, *vlp_cloud); // The content pointed by non_filtered_cloud will contain the content of lidar_msg
 
+	/* To Study
+    pcl::toROSMsg(*vlp_cloud_Ptr,msga);
+	msga.header.stamp=msg->header.stamp;
+	msga.header.frame_id=msg->header.frame_id;
+	sensor_msgs::convertPointCloud2ToPointCloud(msga,msg2);
+			
+	tfBaseLinkBaseCamera=tf::Transform(transformBaseLinkBaseCamera.getRotation(), transformBaseLinkBaseCamera.getOrigin());
+	sensor_msgs::PointCloud2 nube;
+
+	pcl_ros::transformPointCloud("base_link", transformBaseLinkBaseCamera, msga,nube);
+	pcl_ros::transformPointCloud("map", transformOdomBaseLink, nube,nube);
+	pcl::fromROSMsg(nube,*cloud_filtered);
+
+	pcl::PointCloud<pcl::PointXYZRGB> cl_filter=z_filter(cloud_filtered);
+	*cloud_filtered=cl_filter;
+
+	pcl::toROSMsg(*cloud_filtered,nube);
+	nube.header.frame_id="map";
+	nube.header.stamp=msg->header.stamp;
+	pcl_ros::transformPointCloud("base_link", transformBaseLinkOdom, nube,nube);
+	pcl::fromROSMsg(nube,*cloud_filtered);
+	*/
+
     // XYZ filter
 
-    pcl::PointCloud<pcl::PointXYZRGB> aux_xyz = xyz_filter(vlp_cloud);
-    *filtered_cloud = aux;
+    pcl::PointCloud<pcl::PointXYZ> aux_xyz = xyz_filter(vlp_cloud);
+    *xyz_filtered_cloud = aux_xyz;
 
     // Angle filter
 
-    pcl::PointCloud<pcl::PointXYZRGB> aux_angle = angle_filter(filtered_cloud);
-    *filtered_cloud = aux_angle;
+    pcl::PointCloud<pcl::PointXYZ> aux_angle = angle_filter(xyz_filtered_cloud);
+    *xyz_angle_filtered_cloud = aux_angle;
+
+    sensor_msgs::PointCloud2 lidar_cloud2;
+	pcl::toROSMsg(*xyz_angle_filtered_cloud, lidar_cloud2);
+	lidar_cloud2.header.frame_id = lidar_msg->header.frame_id;
+	lidar_cloud2.header.stamp = lidar_msg->header.stamp;
+
+	pub_LiDAR_Pointcloud_Coloured_XYZ_Angle_Filtered.publish(lidar_cloud2);
 
     // End Filter PointCloud //
 
@@ -1270,10 +1346,10 @@ void sensor_fusion_and_monitors_cb(const sensor_msgs::PointCloud2::ConstPtr& lid
     vector<Object> vehicles, pedestrians, only_laser_objects;
     int number_vehicles = 0, number_pedestrians = 0, number_only_laser_objects = 0;
 
-    cluster_filter(filtered_cloud,2,5,2000,&vehicles,number_vehicles,"vehicles");
-    cluster_filter(filtered_cloud,2,5,200,&pedestrians,number_pedestrians,"pedestrians");
+    cluster_filter(xyz_angle_filtered_cloud,1,5,2000,&vehicles,&number_vehicles);
+    cluster_filter(xyz_angle_filtered_cloud,1,5,200,&pedestrians,&number_pedestrians);
 
-    for (int i=0; i<cars.size(); i++)
+    for (int i=0; i<vehicles.size(); i++)
 	{
 		only_laser_objects.push_back(vehicles[i]);
 	}
@@ -1282,10 +1358,11 @@ void sensor_fusion_and_monitors_cb(const sensor_msgs::PointCloud2::ConstPtr& lid
 	{
 		only_laser_objects.push_back(pedestrians[i]);
 	}
-
+    
     cout<<"\nNumber of vehicles: "<<number_vehicles;
 	cout<<"\nNumber of pedestrians: "<<number_pedestrians;
-	cout<<"\nTotal objects: "<<merged_objects.size()<<endl<<endl;
+	cout<<"\nOnly laser objects: "<<only_laser_objects.size()<<endl;
+    cout<<"\nVOT objects: "<<bev_trackers_list_msg->bev_trackers_list.size()<<endl<<endl;
 
     // End LiDAR Clustering //
 
@@ -1294,27 +1371,23 @@ void sensor_fusion_and_monitors_cb(const sensor_msgs::PointCloud2::ConstPtr& lid
     float diff_lidar_vot = 0;
     int object_id = 0;
 
-    for (int i=0; i<bev_trackers_list_msg->tracked_obstacles_list.size(); i++)
+    for (int i=0; i<bev_trackers_list_msg->bev_trackers_list.size(); i++)
     {
         float max_diff_lidar_vot = 4; // Initialize maximum allowed difference
         int index_most_similar = -1;
 
-        float vot_x = float(bev_trackers_list_msg->tracked_obstacles_list[i].x);
-        float vot_y = float(bev_trackers_list_msg->tracked_obstacles_list[i].y);
+        float vot_x = float(bev_trackers_list_msg->bev_trackers_list[i].x);
+        float vot_y = float(bev_trackers_list_msg->bev_trackers_list[i].y);
 
         geometry_msgs::PointStamped local_centroid;
         geometry_msgs::Point32 global_centroid;
 
-        local_centroid.point.x = vot_x;
-        local_centroid.point.y = vot_y;
-        local_centroid.point.z = 0;
-
         global_centroid = Local_To_Global_Coordinates(local_centroid);
-
-        if (only_laser_objects.size() > 0 && (!strcmp(bev_trackers_list_msg->tracked_obstacles_list[i].type.c_str(),"car") || !strcmp(bev_trackers_list_msg->tracked_obstacles_list[i].type.c_str(),"person")))
+		cout << "Type: " << bev_trackers_list_msg->bev_trackers_list[i].type << endl;
+        if (only_laser_objects.size() > 0 && (!strcmp(bev_trackers_list_msg->bev_trackers_list[i].type.c_str(),"car") || !strcmp(bev_trackers_list_msg->bev_trackers_list[i].type.c_str(),"person")))
         {
             double time = bev_trackers_list_msg->header.stamp.toSec();
-            object_id = bev_trackers_list_msg->tracked_obstacles_list[i].object_id;
+            object_id = bev_trackers_list_msg->bev_trackers_list[i].object_id;
 
             geometry_msgs::PointStamped local_centroid;
 			geometry_msgs::Point32 global_centroid;
@@ -1330,6 +1403,10 @@ void sensor_fusion_and_monitors_cb(const sensor_msgs::PointCloud2::ConstPtr& lid
                 float l_x = float(only_laser_objects[j].centroid_x); 
 				float l_y = float(only_laser_objects[j].centroid_y);
 
+				cout << "LiDAR local x: " << l_x << endl;
+                cout << "LiDAR local y: " << l_x << endl;
+				cout << "VOT local x: " << vot_x << endl;
+				cout << "VOT local y: " << vot_y << endl << endl;
                 diff_lidar_vot = float(sqrt(pow(vot_x-l_x,2)+pow(vot_y-l_y,2))); 
 
                 if (diff_lidar_vot < max_diff_lidar_vot) // Find the closest cluster
@@ -1342,12 +1419,12 @@ void sensor_fusion_and_monitors_cb(const sensor_msgs::PointCloud2::ConstPtr& lid
             if (max_diff_lidar_vot < 1.5 && index_most_similar != -1)
             // In order to merge both information, the centroid between distance must be less that 1.5 m (VOT projected centroid and closest LiDAR centroid)
             {
-                only_laser_objects[index_most_similar].type = bev_trackers_list_msg->tracked_obstacles_list[i].type;
-                only_laser_objects[index_most_similar].object_id = bev_trackers_list_msg->tracked_obstacles_list[i].object_id;
-				only_laser_objects[index_most_similar].r = bev_trackers_list_msg->tracked_obstacles_list[i].color.r
-				only_laser_objects[index_most_similar].g = bev_trackers_list_msg->tracked_obstacles_list[i].color.g
-				only_laser_objects[index_most_similar].b = bev_trackers_list_msg->tracked_obstacles_list[i].color.b
-				only_laser_objects[index_most_similar].a = bev_trackers_list_msg->tracked_obstacles_list[i].color.a
+                only_laser_objects[index_most_similar].type = bev_trackers_list_msg->bev_trackers_list[i].type;
+                only_laser_objects[index_most_similar].object_id = bev_trackers_list_msg->bev_trackers_list[i].object_id;
+				/*only_laser_objects[index_most_similar].r = bev_trackers_list_msg->bev_trackers_list[i].color.r
+				only_laser_objects[index_most_similar].g = bev_trackers_list_msg->bev_trackers_list[i].color.g
+				only_laser_objects[index_most_similar].b = bev_trackers_list_msg->bev_trackers_list[i].color.b
+				only_laser_objects[index_most_similar].a = bev_trackers_list_msg->bev_trackers_list[i].color.a*/
 
                 int flag = 0;
 
@@ -1357,14 +1434,14 @@ void sensor_fusion_and_monitors_cb(const sensor_msgs::PointCloud2::ConstPtr& lid
                 {
                     if (merged_objects[k].object_id == object_id)
                     {
-                        merged_objects[k].global_centroid_x = only_laser_objects[index_most_similar].centroid_global_x;
-                        merged_objects[k].global_centroid_y = only_laser_objects[index_most_similar].centroid_global_y;
+                        merged_objects[k].global_centroid_x = only_laser_objects[index_most_similar].global_centroid_x;
+                        merged_objects[k].global_centroid_y = only_laser_objects[index_most_similar].global_centroid_y;
                         merged_objects[k].local_centroid_x = only_laser_objects[index_most_similar].centroid_x;
                         merged_objects[k].local_centroid_y = only_laser_objects[index_most_similar].centroid_y;
 
-                        merged_object.d = only_laser_objects[index_most_similar].d;
-                        merged_object.w = only_laser_objects[index_most_similar].w;
-                        merged_object.h = only_laser_objects[index_most_similar].h;
+                        merged_objects[k].d = only_laser_objects[index_most_similar].d;
+                        merged_objects[k].w = only_laser_objects[index_most_similar].w;
+                        merged_objects[k].h = only_laser_objects[index_most_similar].h;
 
                         flag = 1;
                         break;
@@ -1377,8 +1454,8 @@ void sensor_fusion_and_monitors_cb(const sensor_msgs::PointCloud2::ConstPtr& lid
 				{
                     Merged_Object merged_object;
 
-                    merged_object.global_centroid_x = only_laser_objects[index_most_similar].centroid_global_x;
-                    merged_object.global_centroid_y = only_laser_objects[index_most_similar].centroid_global_y;
+                    merged_object.global_centroid_x = only_laser_objects[index_most_similar].global_centroid_x;
+                    merged_object.global_centroid_y = only_laser_objects[index_most_similar].global_centroid_y;
                     merged_object.local_centroid_x = only_laser_objects[index_most_similar].centroid_x;
                     merged_object.local_centroid_x = only_laser_objects[index_most_similar].centroid_y;
 
@@ -1414,7 +1491,7 @@ void sensor_fusion_and_monitors_cb(const sensor_msgs::PointCloud2::ConstPtr& lid
 	bool pedestrian_detection = false;
 	sec_msgs::Obstacle front_car; 
 	string current_type = "none";
-    std_msgs::Float64 distance_to_front_car;
+    std_msgs::Float64 ACC_distance;
     double distance_to_front_car = 5000000;
 	double distance_overtake = 0;
 
@@ -1422,27 +1499,27 @@ void sensor_fusion_and_monitors_cb(const sensor_msgs::PointCloud2::ConstPtr& lid
 
 	for (unsigned int i=0; i<merged_objects.size(); i++)
 	{
-		point_local.point.x = merged_objects[i].centroid_x;
-		point_local.point.y = merged_objects[i].centroid_y;
-		point_local.point.z = merged_objects[i].centroid_z;
+		point_local.point.x = merged_objects[i].local_centroid_x;
+		point_local.point.y = merged_objects[i].local_centroid_y;
+		point_local.point.z = 0;
 
 		// BEV (Bird's Eye View) of Cluster
 
 		v1 = point_local;
-		v1.point.x = merged_objects[i].centroid_x + (merged_objects[i].w/2);
-		v1.point.y = merged_objects[i].centroid_y - (merged_objects[i].h/2);
+		v1.point.x = merged_objects[i].local_centroid_x + (merged_objects[i].w/2);
+		v1.point.y = merged_objects[i].local_centroid_y - (merged_objects[i].h/2);
 
 		v2 = point_local;
-		v2.point.x = merged_objects[i].centroid_x + (merged_objects[i].w/2);
-		v2.point.y = merged_objects[i].centroid_y + (merged_objects[i].h/2);
+		v2.point.x = merged_objects[i].local_centroid_x + (merged_objects[i].w/2);
+		v2.point.y = merged_objects[i].local_centroid_y + (merged_objects[i].h/2);
 
 		v3 = point_local;
-		v3.point.x = merged_objects[i].centroid_x - (merged_objects[i].w/2);
-		v3.point.y = merged_objects[i].centroid_y + (merged_objects[i].h/2);
+		v3.point.x = merged_objects[i].local_centroid_x - (merged_objects[i].w/2);
+		v3.point.y = merged_objects[i].local_centroid_y + (merged_objects[i].h/2);
 
 		v4 = point_local;
-		v4.point.x = merged_objects[i].centroid_x - (merged_objects[i].w/2);
-		v4.point.y = merged_objects[i].centroid_y - (merged_objects[i].h/2);
+		v4.point.x = merged_objects[i].local_centroid_x - (merged_objects[i].w/2);
+		v4.point.y = merged_objects[i].local_centroid_y - (merged_objects[i].h/2);
 
 		// Transform Local to Global points. TODO: Transform local vertices to global vertices?
 
@@ -1535,10 +1612,10 @@ void sensor_fusion_and_monitors_cb(const sensor_msgs::PointCloud2::ConstPtr& lid
 					{
 						int pedestrian_crossing_occupied = merged_objects[i].pedestrian_state;
 
-						pointaux.x = point32_global.x;
+						/*pointaux.x = point32_global.x;
 						pointaux.y = point32_global.y;
 						pointaux.z = point32_global.z;
-						ObstaclesInPedestrian_Ptr->points.push_back(pointaux);
+						ObstaclesInPedestrian_Ptr->points.push_back(pointaux);*/
 
 						//cout<<"\nPedestrian_crossing_occupied 1: "<<pedestrian_crossing_occupied<<endl;
 
@@ -1579,15 +1656,7 @@ void sensor_fusion_and_monitors_cb(const sensor_msgs::PointCloud2::ConstPtr& lid
 							pedestrian_crossing_occupied = -1; 
 						}
 
-						//cout<<"\nPedestrian_crossing_occupied 2: "<<pedestrian_crossing_occupied<<endl;
-
-						for (int k = 0; k<pTrackers.size(); k++)
-						{	
-							if (pTrackers[k].id == merged_objects[i].id)
-							{
-								pTrackers[k].pedestrian_state = pedestrian_crossing_occupied;
-							}
-						}		
+                        merged_objects[i].pedestrian_state = pedestrian_crossing_occupied;		
 					}
 				}
 			}
@@ -1609,10 +1678,10 @@ void sensor_fusion_and_monitors_cb(const sensor_msgs::PointCloud2::ConstPtr& lid
 
 					if (isInsideLanelet(lane,point32_global.x, point32_global.y,utm_origin))
 					{
-						pointaux.x = point32_global.x;
+						/*pointaux.x = point32_global.x;
 						pointaux.y = point32_global.y;
 						pointaux.z = point32_global.z;
-						ObstaclesMerging_Ptr->points.push_back(pointaux);
+						ObstaclesMerging_Ptr->points.push_back(pointaux);*/
 						merging_occupied = 1;
 					}
 				}
@@ -1833,13 +1902,13 @@ void sensor_fusion_and_monitors_cb(const sensor_msgs::PointCloud2::ConstPtr& lid
 
 	pub_Front_Car.publish(front_car);
 
-	if (number_cars == 0)
+	if (number_vehicles == 0)
 	{
 		distance_to_front_car = 0;
 	}
 
-	distance_To_Front_Car.data = distance_to_front_car;
-	pub_Front_Car_Distance.publish(distance_To_Front_Car);
+	ACC_distance.data = distance_to_front_car;
+	pub_Front_Car_Distance.publish(ACC_distance);
 
 	// Overtaking monitor
 
