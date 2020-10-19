@@ -122,7 +122,7 @@ class image_feature:
         # Detection file 
         
         self.filename = 'tracked_obstacles.txt'
-        self.path = pwd + '/results/' + self.filename
+        self.path = os.getcwd() + '/results/' + self.filename
         
         self.write_video = True
         
@@ -146,7 +146,7 @@ class image_feature:
     def image_to_realworld(self, color, object_score, object_id, object_type, obj_coordinates):
         
         # 2D to Bird's Eye View (LiDAR frame, z-filtered) projection
-        
+        print("to real")
         tracked_obstacle = BEV_tracker()
         tracked_obstacle.type = object_type
         tracked_obstacle.object_id = object_id
@@ -168,7 +168,7 @@ class image_feature:
         # Image world to Bird's Eye View (LiDAR frame, z-filtered) projection
         
         centroid_x = (obj_coordinates[0]+obj_coordinates[2])/2
-        pixels = np.matrix([[centroid_x], [obj_coordinates[3]], [0], [1]]) # 4 x 1
+        pixels = np.matrix([[centroid_x], [obj_coordinates[3]], [1], [1]]) # 4 x 1
         p_camera = np.dot(self.inv_proj_matrix,pixels) 
         K = self.camera_height/p_camera[1]
         p_camera_meters = np.dot(p_camera,K) # Camera frame  
@@ -185,10 +185,10 @@ class image_feature:
         
         tracked_obstacle.x = float(p_camera_meters[2]) 
         tracked_obstacle.y = float(-p_camera_meters[0])
-        
+        print("tracked obstacle: ", tracked_obstacle)
         # Append single tracked obstacle to tracked obstacle list
         
-        self.tracked_obstacles_list.tracked_obstacle_list.append(tracked_obstacle)
+        self.tracked_obstacles_list.bev_trackers_list.append(tracked_obstacle)
         
     def callback(self, image_rosmsg):
         """
@@ -204,7 +204,7 @@ class image_feature:
         
         mode = 'RGBA'
         
-        if self.topic == "/zed/zed_node/left/image_rect_color":
+        if self.image_topic == "/zed/zed_node/left/image_rect_color":
             mode = 'RGBA' # RGB
         
         image = Image.frombytes(mode, (ros_image.width, ros_image.height), ros_image.data)
@@ -274,15 +274,15 @@ class image_feature:
                 output_ros_image.step = 3 * output_ros_image.width
                 output_ros_image.data = im_from_array.tobytes()
             
-                self.image_pub.publish(output_ros_image)
+                self.pub_image_with_vot.publish(output_ros_image)
             
             else: # None object was tracked
                 tracked_obstacle = BEV_tracker()
                 
                 tracked_obstacle.type = "nothing"
                 
-                self.tracked_obstacles_list.header.stamp = rospy.Time.now()
-                self.tracked_obstacles_list.tracked_obstacles_list.append(tracked_obstacle)
+                self.tracked_obstacles_list.header.stamp = image_rosmsg.header.stamp
+                self.tracked_obstacles_list.bev_trackers_list.append(tracked_obstacle)
                 
                 self.pub_image_with_vot.publish(image_rosmsg)
                 
@@ -291,12 +291,12 @@ class image_feature:
             
             tracked_obstacle.type = "nothing"
             
-            self.tracked_obstacles_list.header.stamp = rospy.Time.now()
-            self.tracked_obstacles_list.tracked_obstacles_list.append(tracked_obstacle)
+            self.tracked_obstacles_list.header.stamp = image_rosmsg.header.stamp
+            self.tracked_obstacles_list.bev_trackers_list.append(tracked_obstacle)
             
             self.pub_image_with_vot.publish(image_rosmsg)
 
-        self.pub_tracker_list.publish(self.tracked_obstacle_list)     
+        self.pub_tracker_list.publish(self.tracked_obstacles_list)     
         
         self.end = time.time()
         
@@ -341,7 +341,7 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
     
-    print("\nProcessing ROS topic:", args.topic," ")
+    print("\nProcessing ROS topic:", args.image_topic," ")
     
     main(args)
 
@@ -352,6 +352,7 @@ if __name__ == '__main__':
     
     
     
+
 
 
 
