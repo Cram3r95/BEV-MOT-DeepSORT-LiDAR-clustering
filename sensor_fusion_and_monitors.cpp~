@@ -3,7 +3,7 @@ Created on Thu Dec  8 16:45:21 2019
 
 @author: Carlos Gomez-Huelamo
 
-Code to process the fusion between LiDAR clusters and BEV (Bird's Eye View) 
+Code to process the fusion between LiDAR clusters based on PCL algorithms and BEV (Bird's Eye View) 
 Object Tracking using the Global Nearest Neighbour (GNN) approach and evaluate the objects according 
 to some specified behaviours (ACC, Give Way, STOP, etc.)
 
@@ -121,33 +121,46 @@ typedef struct
 {
 	float centroid_x; // Local centroid (with respect to the "base_link" frame)
 	float centroid_y;
+	float centroid_z;
 	float global_centroid_x; // Global centroid (with respect to the "map" frame)
 	float global_centroid_y;
-    float l;
+	float global_centroid_z;
     float w;
     float h;
-	double orientation;
+    float d;
+	double r;
+	double g;
+	double b;
+    double a;
+	float x_min;
+	float y_min;
+	float z_min;
+	float x_max;
+	float y_max;
+	float z_max;
+	pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
 	string type;
+	int object_id;
     double time;
 }Object;
 
 typedef struct 
 {
-    float centroid_x; // Local centroid (with respect to the "base_link" frame)
-	float centroid_y;
-	float global_centroid_x; // Global centroid (with respect to the "map" frame)
-	float global_centroid_y;
-    float l;
     float w;
     float h;
-	double orientation;
-	string type;
-	int object_id;
-    double time;
+    float d;
+	float global_centroid_x; // Global coordinates (w.r.t. "map" frame)
+	float global_centroid_y;
+    float local_centroid_x; // Local coordinates (w.r.t. "base_link" frame)
+    float local_centroid_y; 
+	int object_id; // VOT (Visual Object Tracking) assigned ID
+    string type;
+	double time;
+	double yaw;
     int pedestrian_state;
     int stop_state;
     int give_way_state;
-}Tracked_Object;
+}Merged_Object;
 
 // End Structures //
 
@@ -156,7 +169,6 @@ typedef struct
 
 // ROS Publishers
 
-ros::Publisher pub_Tracked_Obstacles_Marker;
 ros::Publisher pub_LiDAR_Obstacles_Marker;
 ros::Publisher pub_VOT_Obstacles_Marker;
 ros::Publisher pub_Detected_Pedestrian;
@@ -217,6 +229,8 @@ int merging_occupied;
 
 // Visualization variables
 
+//boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer (new pcl::visualization::PCLVisualizer ("3D Viewer")); // 3D viewer
+
 // Namespaces //
 
 using namespace std;
@@ -237,7 +251,7 @@ geographic_msgs::GeoPoint geo_origin;
 // General purpose variables
 
 vector<std_msgs::ColorRGBA> colours;
-vector<Tracked_Object> tracked_objects;
+vector<Merged_Object> merged_objects;
 Area_Point polygon_area[] = {0,0,
                              0,0,
                              0,0,
@@ -253,17 +267,30 @@ int Number_of_sides = 4; // Of the area you have defined. Here is a rectangle, s
 // General use functions
 
 geometry_msgs::Point32 Local_To_Global_Coordinates(geometry_msgs::PointStamped );
+float get_Centroids_Distance(pcl::PointXYZ , pcl::PointXYZ );
 void Inside_Polygon(Area_Point *, int , Area_Point, bool &);
+void Obstacle_in_Lanelet(pcl::PointCloud<pcl::PointXYZ>::Ptr , geometry_msgs::PointStamped , geometry_msgs::Point32 , geometry_msgs::PointStamped , geometry_msgs::PointStamped , geometry_msgs::PointStamped , geometry_msgs::PointStamped , ros::Time , sec_msgs::Lanelet );
+
+// Point Cloud filters
+
+pcl::PointCloud<pcl::PointXYZ> xyz_filter(pcl::PointCloud<pcl::PointXYZ>::Ptr );
+pcl::PointCloud<pcl::PointXYZ> angle_filter(pcl::PointCloud<pcl::PointXYZ>::Ptr );
+void cluster_filter(pcl::PointCloud<pcl::PointXYZ>::Ptr , float , int , int , vector<Object> *, int *);
+vector<Merged_Object> merging_z(vector<Object> );
+
+// Cluster functions
+
+vector<Merged_Object> merging_z(vector<Object> );
 
 // Calbacks
 
 void route_cb(const sec_msgs::Route::ConstPtr& );
 void waiting_cb(const std_msgs::Empty );
 void test_1_cb(const t4ac_msgs::BEV_trackers_list::ConstPtr& );
-void test_2_cb(const t4ac_msgs::BEV_detections_list::ConstPtr& );
+void test_2_cb(const sensor_msgs::PointCloud2::ConstPtr& );
 void test_3_cb(const nav_msgs::Odometry::ConstPtr& );
 void regelement_cb(const sec_msgs::RegElem::ConstPtr& , const sec_msgs::Route::ConstPtr& );
-void sensor_fusion_and_monitors_cb(const t4ac_msgs::BEV_detections_list::ConstPtr& , const t4ac_msgs::BEV_trackers_list::ConstPtr& , const nav_msgs::Odometry::ConstPtr& );
+void sensor_fusion_and_monitors_cb(const sensor_msgs::PointCloud2::ConstPtr& , const t4ac_msgs::BEV_trackers_list::ConstPtr& , const nav_msgs::Odometry::ConstPtr& );
 
 // End Declarations of functions //
 
@@ -296,6 +323,8 @@ int main (int argc, char ** argv)
 
 	// Publishers //
 
+	pub_LiDAR_Pointcloud_Coloured_XYZ_Angle_Filtered = nh.advertise<sensor_msgs::PointCloud2>("/velodyne_points_coloured_xyz_angle_filtered", 1);
+	//pub_LiDAR_Obstacles = nh.advertise<sec_msgs::ObstacleArray>("/obstacles", 1, true);
 	pub_Detected_Pedestrian = nh.advertise<std_msgs::Bool>("/pedestrian",1);
 	pub_Safe_Merge = nh.advertise<std_msgs::Bool>("/safeMerge",1);
 	pub_Front_Car = nh.advertise<sec_msgs::Obstacle>("/frontCarCurrentLane", 1, true);
@@ -305,9 +334,11 @@ int main (int argc, char ** argv)
 
 	// Tracking publishers
 
-	pub_Tracked_Obstacles_Marker = nh.advertise<visualization_msgs::Marker>("/t4ac/perception/detection/Tracked_Obstacles", 1, true); // Merged (Tracked obstacles)
 	pub_LiDAR_Obstacles_Marker = nh.advertise<visualization_msgs::Marker>("/t4ac/perception/detection/LiDAR_Obstacles", 1, true); // Only LiDAR
     pub_VOT_Obstacles_Marker = nh.advertise<visualization_msgs::Marker>("/t4ac/perception/detection/VOT_BEV_Obstacles", 1, true); // Only vision
+	/*tracked_objects_marker_pub = nh.advertise<visualization_msgs::Marker>("/tracked_objects_marker", 1, true); // Only vision
+	tracked_merged_objects_vel_marker_pub = nh.advertise<visualization_msgs::Marker>("/tracked_merged_objects_marker_vel", 1, true); // Sensor fusion LiDAR and Camera
+	tracked_merged_objects_marker_pub = nh.advertise<visualization_msgs::Marker>("/tracked_merged_objects_marker", 1, true); // Sensor fusion LiDAR and Camera*/
 	
 	// End Publishers //
 
@@ -319,8 +350,7 @@ int main (int argc, char ** argv)
 	message_filters::Subscriber<sensor_msgs::PointCloud2> cloud_sub_; // Coloured LiDAR point cloud
 	message_filters::Subscriber<sensor_msgs::PointCloud2> velodyne_cloud_sub_; // LiDAR point cloud
 	message_filters::Subscriber<nav_msgs::Odometry> ego_vehicle_pose_sub_; // Odometry
-	message_filters::Subscriber<t4ac_msgs::BEV_trackers_list> projected_vot_sub_; // Detection and Tracking with camera (CenterNet + Deep Sort)
-    message_filters::Subscriber<t4ac_msgs::BEV_detections_list> lidar_detections_sub_; // LiDAR detections
+	message_filters::Subscriber<t4ac_msgs::BEV_trackers_list> projected_vot_; // Detection and Tracking with camera (CenterNet + Deep Sort)
 
 	regelem_sub_.subscribe(nh, "/currentRegElem", 1);
 	regelemLanelet_sub_.subscribe(nh, "/monitorizedLanelets", 1);
@@ -330,7 +360,7 @@ int main (int argc, char ** argv)
 	projected_vot_sub_.subscribe(nh, "/t4ac/perception/tracked_obstacles", 1);
 
     /*test_1_sub = nh.subscribe<t4ac_msgs::BEV_trackers_list>("/t4ac/perception/tracked_obstacles", 1, &test_1_cb);
-    test_2_sub = nh.subscribe<t4ac_msgs::BEV_detections_list>("/t4ac/perception/detection/bev_detections", 1, &test_2_cb);
+    test_2_sub = nh.subscribe<sensor_msgs::PointCloud2>("/t4ac/perception/detection/bev_detections", 1, &test_2_cb);
     test_3_sub = nh.subscribe<nav_msgs::Odometry>("/localization/pose", 1, &test_3_cb);*/
 
     waiting_sub = nh.subscribe<std_msgs::Empty>("/waitingAtStop", 1, &waiting_cb);
@@ -349,7 +379,7 @@ int main (int argc, char ** argv)
 	// Callback 2: Synchronize LiDAR point cloud and camera information (including detection and tracking). Evaluate monitors (Approximate time)
 
 	typedef message_filters::sync_policies::ApproximateTime<t4ac_msgs::BEV_detections_list, t4ac_msgs::BEV_trackers_list, nav_msgs::Odometry> MySyncPolicy2;
-	message_filters::Synchronizer<MySyncPolicy2> sync2_(MySyncPolicy2(100), lidar_detections_sub_, projected_vot_sub_, ego_vehicle_pose_sub_);
+	message_filters::Synchronizer<MySyncPolicy2> sync2_(MySyncPolicy2(100), lidar_detections_sub_, projected_vot_, ego_vehicle_pose_sub_);
 	sync2_.registerCallback(boost::bind(&sensor_fusion_and_monitors_cb, _1, _2, _3));
 
 	// Load map
@@ -494,6 +524,20 @@ geometry_msgs::Point32 Local_To_Global_Coordinates(geometry_msgs::PointStamped p
 	return(point32_global);
 }
 
+// Obtain the distance between two 3D points 
+float get_Centroids_Distance(pcl::PointXYZ p1, pcl::PointXYZ p2)
+{
+	// Parameters: 
+	// p1, p2: Two 3D points
+
+	// Returns the Euclidean distance between both 3D points
+
+	float root;
+	root = float(sqrt(pow(p1.x-p2.x,2)+pow(p1.y-p2.y,2)+pow(p1.z-p2.z,2)));
+
+	return root;
+}
+
 // Check if a point is inside a certain area (https://jsbsan.blogspot.com/2011/01/saber-si-un-punto-esta-dentro-o-fuera.html)
 void Inside_Polygon(Area_Point *polygon, int N, Area_Point p, bool &detection)
 {
@@ -536,6 +580,333 @@ void Inside_Polygon(Area_Point *polygon, int N, Area_Point p, bool &detection)
 	{
 		detection = true; 
 	}	
+}
+
+void Obstacle_in_Lanelet(pcl::PointCloud<pcl::PointXYZ>::Ptr ObstaclesInLanelet_Ptr, geometry_msgs::PointStamped point_local, geometry_msgs::Point32 point32_global, geometry_msgs::PointStamped v1, geometry_msgs::PointStamped v2, geometry_msgs::PointStamped v3, geometry_msgs::PointStamped v4, ros::Time stamp, sec_msgs::Lanelet lanelet)
+{
+	current_obstacle.header.stamp = stamp;
+	current_obstacle.header.frame_id = "/base_link";
+
+	//cout<<"Point local x: "<<point_local.point.x;
+	//cout<<"Point local y: "<<point_local.point.y;
+
+	current_obstacle.pose.position.x = point_local.point.x;
+	current_obstacle.pose.position.y = point_local.point.y;
+	current_obstacle.pose.position.z = point_local.point.z;
+
+	current_obstacle.laneletID = lanelet.id;
+
+	geometry_msgs::Point32 pointaux32;
+	pcl::PointXYZ pointaux;
+
+	// Store the vertices of the obstacle
+
+	current_obstacle.shape.points.clear();
+
+	pointaux32.x = v1.point.x;
+	pointaux32.y = v1.point.y;
+	pointaux32.z = v1.point.z;
+
+	current_obstacle.shape.points.push_back(pointaux32);
+
+	pointaux32.x = v2.point.x;
+	pointaux32.y = v2.point.y;
+	pointaux32.z = v2.point.z;
+
+	current_obstacle.shape.points.push_back(pointaux32);
+
+	pointaux32.x = v3.point.x;
+	pointaux32.y = v3.point.y;
+	pointaux32.z = v3.point.z;
+
+	current_obstacle.shape.points.push_back(pointaux32);
+
+	pointaux32.x = v4.point.x;
+	pointaux32.y = v4.point.y;
+	pointaux32.z = v4.point.z;
+
+	current_obstacle.shape.points.push_back(pointaux32);
+
+	Obstacles.obstacles.push_back(current_obstacle);
+
+	// Obstacle in lanelet
+
+	pointaux.x=point32_global.x;
+	pointaux.y=point32_global.y;
+	pointaux.z=point32_global.z;
+
+	ObstaclesInLanelet_Ptr->points.push_back(pointaux);
+}
+
+
+// Point Cloud functions
+
+// Filter the input LiDAR point cloud in terms of xyz dimensions
+pcl::PointCloud<pcl::PointXYZ> xyz_filter(pcl::PointCloud<pcl::PointXYZ>::Ptr non_filtered_cloud)
+{
+	// Parameters:
+	// non_filtered_cloud: Input LiDAR point cloud 
+
+	// Returns a xyz filtered point cloud
+
+	pcl::PointCloud<pcl::PointXYZ> filtered_cloud;
+
+	for (int i=0; i<non_filtered_cloud->points.size(); i++)
+	{
+		pcl::PointXYZ aux_point; // A single point
+		aux_point = non_filtered_cloud->points[i];
+
+		// Z must be above the sidewalk
+
+		if (aux_point.z > -1.90)
+		{
+			filtered_cloud.points.push_back(aux_point);
+		}
+	}
+
+	return filtered_cloud;
+}
+
+// Filter the input LiDAR point cloud in terms of angle
+pcl::PointCloud<pcl::PointXYZ> angle_filter(pcl::PointCloud<pcl::PointXYZ>::Ptr non_filtered_cloud) 
+{
+	// Parameters:
+	// non_filtered_cloud: Input LiDAR point cloud 
+
+	// Returns an angle filtered point cloud
+
+	pcl::PointCloud<pcl::PointXYZ> filtered_cloud;
+
+	float field_of_view = 80; // Out of this field of view (centered in the LiDAR) the point cloud is discarded
+
+	// Take into account the field of view (in degrees) of your camera
+	cout << "Input size: " << non_filtered_cloud->points.size() << endl;
+	for (int i=0; i<non_filtered_cloud->points.size(); i++)
+	{
+		pcl::PointXYZ aux_point; // A single point
+		aux_point = non_filtered_cloud->points[i];
+
+		double aux_point_angle = atan2(aux_point.y, aux_point.x); // Angle with respect to the "base_link" frame
+
+		if ((aux_point_angle<((field_of_view/2)*(M_PI/180))) && (aux_point_angle>((-field_of_view/2)*(M_PI/180))))
+		{
+			filtered_cloud.push_back(aux_point);
+		}
+	}
+    cout << "Output size: " << filtered_cloud.points.size() << endl;
+	return filtered_cloud;
+}
+
+// Extract clusters from the coloured XYZ filtered LiDAR point cloud according to the input cluster parameters
+void cluster_filter(pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_cloud, float tolerance, int min_cluster, int max_cluster, vector<Object> *output_objects, int *number_output_objects)
+{
+	// Parameters:
+	// filtered_cloud: XYZ and angle filtered LiDAR point cloud that contains the clusters
+	// tolerance: Tolerance of clusters
+	// min_cluster: Minimum size of a cluster
+	// max_cluster: Maximum size of a cluster
+	// only_laser_objects: Pointer that points to the array that contains the clusters
+	// only_laser_objects_number: Number of objects
+
+	// This function only takes into account the size of the clusters
+
+    // Extract clusters from point cloud
+
+	pcl::search::KdTree<pcl::PointXYZ>::Ptr tree (new pcl::search::KdTree<pcl::PointXYZ>);
+	tree->setInputCloud (filtered_cloud);
+	vector<pcl::PointIndices> cluster_indices;
+	pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
+	ec.setClusterTolerance (tolerance); 
+	ec.setMinClusterSize (min_cluster); 
+	ec.setMaxClusterSize (max_cluster);
+	ec.setSearchMethod (tree);
+	ec.setInputCloud (filtered_cloud);
+	ec.extract (cluster_indices);
+
+    // Store the clusters
+
+	for (vector<pcl::PointIndices>::const_iterator it = cluster_indices.begin(); it != cluster_indices.end(); ++it)
+	{
+		pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_cluster (new pcl::PointCloud<pcl::PointXYZ>);
+ 
+		for (std::vector<int>::const_iterator pit = it->indices.begin(); pit != it->indices.end(); ++pit)
+		{
+			cloud_cluster->points.push_back (filtered_cloud->points[*pit]); 
+		}
+
+		cloud_cluster->width = cloud_cluster->points.size();
+		cloud_cluster->height = 1;
+		cloud_cluster->is_dense = true;
+ 
+		// Initialize point cloud vertices. Set to +/- INFINITY to ensure a proper behaviour for the first cluster
+
+		float x_min = INFINITY; 
+		float y_min = INFINITY;
+		float z_min = INFINITY;
+		float x_max = -INFINITY;
+		float y_max = -INFINITY;
+		float z_max = -INFINITY;
+ 
+		float centroid_x = -INFINITY;
+		float centroid_y = -INFINITY;
+		float centroid_z = -INFINITY;
+ 
+		for (int i = 0; i < cloud_cluster->points.size(); i++)
+		{
+			if (cloud_cluster->points[i].x < x_min)		
+			{
+				x_min = cloud_cluster->points[i].x;
+			}
+ 
+			if (cloud_cluster->points[i].y < y_min)		
+			{
+				y_min = cloud_cluster->points[i].y;
+			}
+ 
+			if (cloud_cluster->points[i].z < z_min)	
+			{
+				z_min = cloud_cluster->points[i].z;		
+			}
+			if (cloud_cluster->points[i].x > x_max)
+			{
+				x_max = cloud_cluster->points[i].x;
+			}
+			if (cloud_cluster->points[i].y > y_max)
+			{
+				y_max = cloud_cluster->points[i].y;
+			}
+			if (cloud_cluster->points[i].z > z_max)
+			{
+				z_max = cloud_cluster->points[i].z;
+			}
+		}
+
+		// Centroid
+
+		centroid_x = (x_max+x_min)/2.0;
+		centroid_y = (y_max+y_min)/2.0;
+		centroid_z = (z_max+z_min)/2.0;
+
+		Eigen::Vector4f centroid;
+		pcl::compute3DCentroid(*cloud_cluster,centroid);
+
+		geometry_msgs::PointStamped local_centroid;
+		geometry_msgs::Point32 global_centroid;
+
+		local_centroid.point.x = centroid_x;
+		local_centroid.point.y = centroid_y;
+		local_centroid.point.z = centroid_z;
+
+		global_centroid = Local_To_Global_Coordinates(local_centroid);
+
+        // Lanelet filter //
+
+        if (lanelet_filter)
+        {
+            // Lanelets filter // Only use if you are working in real mode or the rosbag has /monitorizedLanelets according to the current map 
+			// (since if you modify some node, all ID change in the map)
+
+            for (int j=0; j<monitorized_lanelets.route.size(); j++)
+			{
+				sec_msgs::Lanelet lanelet = monitorized_lanelets.route[j];
+				lanelet_ptr_t lane = loadedMap -> lanelet_by_id(lanelet.id);
+				cout << "Global centroid x: " << global_centroid.x;
+				cout << "Global centroid y: " << global_centroid.y;
+
+                if (isInsideLanelet(lane, global_centroid.x, global_centroid.y, utm_origin))
+				{
+					cout << "Is inside!" << endl;
+					// Object measurements
+
+					Object object;
+
+					object.x_max = x_max;
+					object.x_min = x_min;
+					object.y_max = y_max;
+					object.y_min = y_min;
+					object.z_max = z_max;
+					object.z_min = z_min;
+
+                    object.d = x_max - x_min;
+                    object.w = y_max -y_min;
+                    object.h = z_max - z_min;
+
+                    object.centroid_x = centroid[0];
+					object.centroid_y = centroid[1];
+					object.centroid_z = centroid[2];
+
+                    // Global coordinates
+
+					object.global_centroid_x = global_centroid.x;
+					object.global_centroid_y = global_centroid.y;
+					object.global_centroid_z = global_centroid.z;
+
+                    // Type
+
+					object.type = "none";
+
+					// Cloud
+
+					object.cloud = cloud_cluster;
+
+					output_objects->push_back(object);
+					*number_output_objects = *number_output_objects + 1;
+
+					break; // Continue with the next object
+                }
+            }
+        }
+		else if(x_max-x_min<4 && y_max-y_min<2) // To avoid huge group of non-sense points
+		{
+			Object object;
+
+			object.x_max = x_max;
+			object.x_min = x_min;
+			object.y_max = y_max;
+			object.y_min = y_min;
+			object.z_max = z_max;
+			object.z_min = z_min;
+
+            object.d = x_max - x_min;
+            object.w = y_max -y_min;
+            object.h = z_max - z_min;
+
+            object.centroid_x = centroid[0];
+			object.centroid_y = centroid[1];
+			object.centroid_z = centroid[2];
+
+            // Global coordinates
+
+			object.global_centroid_x = global_centroid.x;
+			object.global_centroid_y = global_centroid.y;
+			object.global_centroid_z = global_centroid.z;
+
+            // Type
+
+			object.type = "none";
+
+			// Cloud
+
+			object.cloud = cloud_cluster;
+
+			output_objects->push_back(object);
+			*number_output_objects = *number_output_objects + 1;
+
+			break; // Continue with the next object
+		}
+	}
+}
+
+// Merging different clusters with the same XY position
+vector<Merged_Object> merging_z(vector<Object> objects)
+{
+	// Parameters
+	// Objects: Objects to merge
+	
+	// Returns z merged objects
+
+	vector<Merged_Object> merged_objects;
+	merged_objects.clear();
 }
 
 
@@ -883,55 +1254,42 @@ void sensor_fusion_and_monitors_cb(const t4ac_msgs::BEV_detections_list::ConstPt
 
 	previous_odom = *ego_vehicle_pose_msg;
 
-	vector<Object> laser_objects;
-	int number_vehicles = 0;
-    int number_pedestrians = 0;
+	cout<<"\nOnly laser objects: "<<lidar_detections_msg->bev_detections_list.size();
+    cout<<"\nVOT objects: "<<bev_trackers_list_msg->bev_trackers_list.size()<<endl<<endl;
 
-    for (int i = 0; i < lidar_detections_msg->bev_detections_list.size(); i++)
+	// Publish
+
+    for (int i = 0; i < only_laser_objects.size(); i++)
 	{
-		Object object;
-	
-		object.centroid_x = -lidar_detections_msg->bev_detections_list[i].y;
-        object.centroid_y =  lidar_detections_msg->bev_detections_list[i].x;
+		visualization_msgs::Marker obstacle_points;
 
-		geometry_msgs::PointStamped  centroid;
-		geometry_msgs::Point32 global_centroid;
+		obstacle_points.header.frame_id = "/base_link"; // map == global coordinates. Base_link == local coordinates
+		obstacle_points.header.stamp = lidar_detections_msg->header.stamp;
+		obstacle_points.ns = "map_manager_visualization";
+		obstacle_points.action = visualization_msgs::Marker::ADD;
+		obstacle_points.type = visualization_msgs::Marker::SPHERE;
+	 	obstacle_points.id = only_laser_objects[i].object_id;
 
-		centroid.point.x = object.centroid_x;
-		centroid.point.y = object.centroid_y;
-		centroid.point.z = 0;
+		obstacle_points.points.clear();
 
-		global_centroid = Local_To_Global_Coordinates(centroid);
+		obstacle_points.color = colours[1]; // Only green;
+		obstacle_points.scale.x = 0.50;
+		obstacle_points.scale.y = 0.50;
+		obstacle_points.scale.z = 0.50;
+		obstacle_points.lifetime = ros::Duration(0.40);
 
-		object.global_centroid_x = global_centroid.x;
-		object.global_centroid_y = global_centroid.y;
+		/*obstacle_points.pose.position.x = only_laser_objects[i].global_centroid_x;
+		obstacle_points.pose.position.y = only_laser_objects[i].global_centroid_y;
+		obstacle_points.pose.position.z = only_laser_objects[i].global_centroid_z;*/
 
-		object.l = lidar_detections_msg->bev_detections_list[i].l;
-        object.w = lidar_detections_msg->bev_detections_list[i].w; 
-        object.h = 1.7; // Height of the obstacle. TODO: Take from the 3D object detector
+        obstacle_points.pose.position.x = only_laser_objects[i].centroid_x;
+		obstacle_points.pose.position.y = only_laser_objects[i].centroid_y;
+		obstacle_points.pose.position.z = only_laser_objects[i].centroid_z;
 
-		object.orientation = lidar_detections_msg->bev_detections_list[i].o;
-
-		string type = lidar_detections_msg->bev_detections_list[i].type;
-
-		if (!strcmp(type.c_str(),"1"))
-		{
-			object.type = "car";
-			number_vehicles++;
-		}
-		else if (!strcmp(type.c_str(),"2"))
-		{
-			object.type = "pedestrian";
-			number_pedestrians++;
-		}
-
-		object.time = lidar_detections_msg->header.stamp.toSec();
-
-		laser_objects.push_back(object);
+		pub_LiDAR_Obstacles_Marker.publish(obstacle_points);
 	}
 
-	cout<<"\nLaser objects: "<<lidar_detections_msg->bev_detections_list.size();
-    cout<<"\nVOT objects: "<<bev_trackers_list_msg->bev_trackers_list.size()<<endl<<endl;
+    // End LiDAR Clustering //
 
     // BEV Projected VOT (Visual Object Tracking)
     
@@ -959,9 +1317,9 @@ void sensor_fusion_and_monitors_cb(const t4ac_msgs::BEV_detections_list::ConstPt
 		obstacle_points.scale.z = 0.50;
 		obstacle_points.lifetime = ros::Duration(0.40);
 
-		/*obstacle_points.pose.position.x = laser_objects[i].global_centroid_x;
-		obstacle_points.pose.position.y = laser_objects[i].global_centroid_y;
-		obstacle_points.pose.position.z = laser_objects[i].global_centroid_z;*/
+		/*obstacle_points.pose.position.x = only_laser_objects[i].global_centroid_x;
+		obstacle_points.pose.position.y = only_laser_objects[i].global_centroid_y;
+		obstacle_points.pose.position.z = only_laser_objects[i].global_centroid_z;*/
 
         obstacle_points.pose.position.x = bev_trackers_list_msg->bev_trackers_list[i].x;
 		obstacle_points.pose.position.y = bev_trackers_list_msg->bev_trackers_list[i].y;
@@ -978,33 +1336,34 @@ void sensor_fusion_and_monitors_cb(const t4ac_msgs::BEV_detections_list::ConstPt
         float vot_x = float(bev_trackers_list_msg->bev_trackers_list[i].x);
         float vot_y = float(bev_trackers_list_msg->bev_trackers_list[i].y);
 
-        geometry_msgs::PointStamped  centroid;
+        geometry_msgs::PointStamped local_centroid;
         geometry_msgs::Point32 global_centroid;
 
+        global_centroid = Local_To_Global_Coordinates(local_centroid);
 		cout << "Type: " << bev_trackers_list_msg->bev_trackers_list[i].type << endl;
-        if (laser_objects.size() > 0 && (!strcmp(bev_trackers_list_msg->bev_trackers_list[i].type.c_str(),"car") || !strcmp(bev_trackers_list_msg->bev_trackers_list[i].type.c_str(),"person")))
+        if (only_laser_objects.size() > 0 && (!strcmp(bev_trackers_list_msg->bev_trackers_list[i].type.c_str(),"car") || !strcmp(bev_trackers_list_msg->bev_trackers_list[i].type.c_str(),"person")))
         {
             double time = bev_trackers_list_msg->header.stamp.toSec();
             object_id = bev_trackers_list_msg->bev_trackers_list[i].object_id;
 
-            geometry_msgs::PointStamped  centroid;
+            geometry_msgs::PointStamped local_centroid;
 			geometry_msgs::Point32 global_centroid;
 
-			centroid.point.x = vot_x;
-			centroid.point.y = vot_y;
-			centroid.point.z = 0;
+			local_centroid.point.x = vot_x;
+			local_centroid.point.y = vot_y;
+			local_centroid.point.z = 0;
 
-			global_centroid = Local_To_Global_Coordinates(centroid);
+			global_centroid = Local_To_Global_Coordinates(local_centroid);
 
-            for (int j=0; j<laser_objects.size(); j++)
+            for (int j=0; j<only_laser_objects.size(); j++)
             {
-                float l_x = float(laser_objects[j].centroid_x); 
-				float l_y = float(laser_objects[j].centroid_y);
+                float l_x = float(only_laser_objects[j].centroid_x); 
+				float l_y = float(only_laser_objects[j].centroid_y);
 
-				/*cout << "LiDAR local x: " << l_x << endl;
+				cout << "LiDAR local x: " << l_x << endl;
                 cout << "LiDAR local y: " << l_y << endl;
 				cout << "VOT local x: " << vot_x << endl;
-				cout << "VOT local y: " << vot_y << endl << endl;*/
+				cout << "VOT local y: " << vot_y << endl << endl;
                 diff_lidar_vot = float(sqrt(pow(vot_x-l_x,2)+pow(vot_y-l_y,2))); 
 
                 if (diff_lidar_vot < max_diff_lidar_vot) // Find the closest cluster
@@ -1013,32 +1372,36 @@ void sensor_fusion_and_monitors_cb(const t4ac_msgs::BEV_detections_list::ConstPt
 					index_most_similar = j;
 				}
             }
-			//cout << "Max diff lidar vot: " << max_diff_lidar_vot << endl;
+			cout << "Max diff lidar vot: " << max_diff_lidar_vot << endl;
             if (max_diff_lidar_vot < 1.5 && index_most_similar != -1)
             // In order to merge both information, the centroid between distance must be less that 1.5 m (VOT projected centroid and closest LiDAR centroid)
             {
+                only_laser_objects[index_most_similar].type = bev_trackers_list_msg->bev_trackers_list[i].type;
+                only_laser_objects[index_most_similar].object_id = bev_trackers_list_msg->bev_trackers_list[i].object_id;
+				/*only_laser_objects[index_most_similar].r = bev_trackers_list_msg->bev_trackers_list[i].color.r
+				only_laser_objects[index_most_similar].g = bev_trackers_list_msg->bev_trackers_list[i].color.g
+				only_laser_objects[index_most_similar].b = bev_trackers_list_msg->bev_trackers_list[i].color.b
+				only_laser_objects[index_most_similar].a = bev_trackers_list_msg->bev_trackers_list[i].color.a*/
+
                 int flag = 0;
 
                 // 1. Find out if current merged object was previously stored. Id does, update the object
 
-                for (int k=0; k<<tracked_objects.size(); k++)
+                for (int k=0; k<merged_objects.size(); k++)
                 {
-                    if (tracked_objects[k].object_id == object_id)
+                    if (merged_objects[k].object_id == object_id)
                     {
-						tracked_objects[k].centroid_x = laser_objects[index_most_similar].centroid_x;
-						tracked_objects[k].centroid_y = laser_objects[index_most_similar].centroid_y;
-						tracked_objects[k].global_centroid_x = laser_objects[index_most_similar].global_centroid_x;
-						tracked_objects[k].global_centroid_y = laser_objects[index_most_similar].global_centroid_y;
+                        merged_objects[k].global_centroid_x = only_laser_objects[index_most_similar].global_centroid_x;
+                        merged_objects[k].global_centroid_y = only_laser_objects[index_most_similar].global_centroid_y;
+                        merged_objects[k].local_centroid_x = only_laser_objects[index_most_similar].centroid_x;
+                        merged_objects[k].local_centroid_y = only_laser_objects[index_most_similar].centroid_y;
 
-						tracked_objects[k].l = laser_objects[index_most_similar].l;
-						tracked_objects[k].w = laser_objects[index_most_similar].w;
-						tracked_objects[k].h = laser_objects[index_most_similar].h;
-						tracked_objects[k].orientation = laser_objects[index_most_similar].orientation;
-	
-						tracked_objects[k].time = laser_objects[index_most_similar].time;
+                        merged_objects[k].d = only_laser_objects[index_most_similar].d;
+                        merged_objects[k].w = only_laser_objects[index_most_similar].w;
+                        merged_objects[k].h = only_laser_objects[index_most_similar].h;
 
-						flag = 1;
-						break;
+                        flag = 1;
+                        break;
                     }
                 }
 
@@ -1046,64 +1409,36 @@ void sensor_fusion_and_monitors_cb(const t4ac_msgs::BEV_detections_list::ConstPt
 	
 				if (flag == 0)
 				{
-					Tracked_Object tracked_object;
+                    Merged_Object merged_object;
 
-					tracked_object.centroid_x = laser_objects[index_most_similar].centroid_x;
-					tracked_object.centroid_y = laser_objects[index_most_similar].centroid_y;
-					tracked_object.global_centroid_x = laser_objects[index_most_similar].global_centroid_x;
-					tracked_object.global_centroid_y = laser_objects[index_most_similar].global_centroid_y;
+                    merged_object.global_centroid_x = only_laser_objects[index_most_similar].global_centroid_x;
+                    merged_object.global_centroid_y = only_laser_objects[index_most_similar].global_centroid_y;
+                    merged_object.local_centroid_x = only_laser_objects[index_most_similar].centroid_x;
+                    merged_object.local_centroid_x = only_laser_objects[index_most_similar].centroid_y;
 
-					tracked_object.l = laser_objects[index_most_similar].l;
-					tracked_object.w = laser_objects[index_most_similar].w;
-					tracked_object.h = laser_objects[index_most_similar].h;
-					tracked_object.orientation = laser_objects[index_most_similar].orientation;
+                    merged_object.d = only_laser_objects[index_most_similar].d;
+                    merged_object.w = only_laser_objects[index_most_similar].w;
+                    merged_object.h = only_laser_objects[index_most_similar].h;
 
-					tracked_object.type = laser_objects[index_most_similar].type;
-					tracked_object.object_id = object_id;
-					tracked_object.time = laser_objects[index_most_similar].time;
+                    merged_object.object_id = only_laser_objects[index_most_similar].object_id;
+                    merged_object.type = only_laser_objects[index_most_similar].type;
 
-					tracked_objects.push_back(tracked_object);
+                    merged_objects.push_back(merged_object);
                 }
             }
         }
     }
 
-	// Publish merged obstacles 
-
-	for (int i = 0; i < tracked_objects.size(); i++)
-	{
-		visualization_msgs::Marker obstacle_points;
-
-		obstacle_points.header.frame_id = "/base_link"; // map == global coordinates. Base_link == local coordinates
-		obstacle_points.header.stamp = bev_trackers_list_msg->header.stamp;
-		obstacle_points.ns = "map_manager_visualization";
-		obstacle_points.action = visualization_msgs::Marker::ADD;
-		obstacle_points.type = visualization_msgs::Marker::SPHERE;
-	 	obstacle_points.id = tracked_objects[i].object_id;
-
-		obstacle_points.points.clear();
-
-		obstacle_points.color = colours[1]; // Only green;
-		obstacle_points.scale.x = 0.50;
-		obstacle_points.scale.y = 0.50;
-		obstacle_points.scale.z = 0.50;
-		obstacle_points.lifetime = ros::Duration(0.40);
-
-        obstacle_points.pose.position.x = tracked_objects[i].centroid_x;
-		obstacle_points.pose.position.y = tracked_objects[i].centroid_y;
-		obstacle_points.pose.position.z = 0;
-
-		pub_Tracked_Obstacles_Marker.publish(obstacle_points);
-	}
-
     // Monitors //
-/*
+
 	Obstacles.obstacles.clear();
 
 	// Auxiliar variables for obstacles
 
 	geometry_msgs::PointStamped point_local, point_global, v1, v2, v3, v4, v1_global, v2_global, v3_global, v4_global; // v-i = Vertice of the BEV bounding box
 	geometry_msgs::Point32 point32_global;
+
+	pcl::PointXYZ pointaux;
 	
 	point_local.header.frame_id = "/base_link";
 	point_local.header.stamp = lidar_detections_msg->header.stamp;
@@ -1119,29 +1454,29 @@ void sensor_fusion_and_monitors_cb(const t4ac_msgs::BEV_detections_list::ConstPt
 
 	// Object evaluation For each detected cluster, regardingless if the obstacle is in the current lanelet //
 
-	for (unsigned int i=0; i<<tracked_objects.size(); i++)
+	for (unsigned int i=0; i<merged_objects.size(); i++)
 	{
-		point_local.point.x =  tracked_objects[i].centroid_x;
-		point_local.point.y =  tracked_objects[i].centroid_y;
+		point_local.point.x = merged_objects[i].local_centroid_x;
+		point_local.point.y = merged_objects[i].local_centroid_y;
 		point_local.point.z = 0;
 
 		// BEV (Bird's Eye View) of Cluster
 
 		v1 = point_local;
-		v1.point.x =  tracked_objects[i].centroid_x + tracked_objects[i].w/2;
-		v1.point.y =  tracked_objects[i].centroid_y - tracked_objects[i].h/2;
+		v1.point.x = merged_objects[i].local_centroid_x + (merged_objects[i].w/2);
+		v1.point.y = merged_objects[i].local_centroid_y - (merged_objects[i].h/2);
 
 		v2 = point_local;
-		v2.point.x =  tracked_objects[i].centroid_x + tracked_objects[i].w/2;
-		v2.point.y =  tracked_objects[i].centroid_y + tracked_objects[i].h/2;
+		v2.point.x = merged_objects[i].local_centroid_x + (merged_objects[i].w/2);
+		v2.point.y = merged_objects[i].local_centroid_y + (merged_objects[i].h/2);
 
 		v3 = point_local;
-		v3.point.x =  tracked_objects[i].centroid_x - tracked_objects[i].w/2;
-		v3.point.y =  tracked_objects[i].centroid_y + tracked_objects[i].h/2;
+		v3.point.x = merged_objects[i].local_centroid_x - (merged_objects[i].w/2);
+		v3.point.y = merged_objects[i].local_centroid_y + (merged_objects[i].h/2);
 
 		v4 = point_local;
-		v4.point.x =  tracked_objects[i].centroid_x - tracked_objects[i].w/2;
-		v4.point.y =  tracked_objects[i].centroid_y - tracked_objects[i].h/2;
+		v4.point.x = merged_objects[i].local_centroid_x - (merged_objects[i].w/2);
+		v4.point.y = merged_objects[i].local_centroid_y - (merged_objects[i].h/2);
 
 		// Transform Local to Global points. TODO: Transform local vertices to global vertices?
 
@@ -1232,12 +1567,12 @@ void sensor_fusion_and_monitors_cb(const t4ac_msgs::BEV_detections_list::ConstPt
 
 					if (pedestrian_detection) // Pedestrian detected in the safety area
 					{
-						int pedestrian_crossing_occupied =  tracked_objects[i].pedestrian_state;
+						int pedestrian_crossing_occupied = merged_objects[i].pedestrian_state;
 
-						//pointaux.x = point32_global.x;
-						//pointaux.y = point32_global.y;
-						//pointaux.z = point32_global.z;
-						//ObstaclesInPedestrian_Ptr->points.push_back(pointaux);
+						/*pointaux.x = point32_global.x;
+						pointaux.y = point32_global.y;
+						pointaux.z = point32_global.z;
+						ObstaclesInPedestrian_Ptr->points.push_back(pointaux);*/
 
 						//cout<<"\nPedestrian_crossing_occupied 1: "<<pedestrian_crossing_occupied<<endl;
 
@@ -1278,7 +1613,7 @@ void sensor_fusion_and_monitors_cb(const t4ac_msgs::BEV_detections_list::ConstPt
 							pedestrian_crossing_occupied = -1; 
 						}
 
-                         tracked_objects[i].pedestrian_state = pedestrian_crossing_occupied;		
+                        merged_objects[i].pedestrian_state = pedestrian_crossing_occupied;		
 					}
 				}
 			}
@@ -1300,10 +1635,10 @@ void sensor_fusion_and_monitors_cb(const t4ac_msgs::BEV_detections_list::ConstPt
 
 					if (isInsideLanelet(lane,point32_global.x, point32_global.y,utm_origin))
 					{
-						//pointaux.x = point32_global.x;
-						//pointaux.y = point32_global.y;
-						//pointaux.z = point32_global.z;
-						//ObstaclesMerging_Ptr->points.push_back(pointaux);
+						/*pointaux.x = point32_global.x;
+						pointaux.y = point32_global.y;
+						pointaux.z = point32_global.z;
+						ObstaclesMerging_Ptr->points.push_back(pointaux);*/
 						merging_occupied = 1;
 					}
 				}
@@ -1460,9 +1795,9 @@ void sensor_fusion_and_monitors_cb(const t4ac_msgs::BEV_detections_list::ConstPt
 
 	global_pedestrian_crossing_occupied = 0;
 
-	for (int i=0; i<<tracked_objects.size(); i++) // If at least one pedestrian is about to cross ...
+	for (int i=0; i<merged_objects.size(); i++) // If at least one pedestrian is about to cross ...
 	{
-		if (!strcmp(tracked_objects[i].type.c_str(),"pedestrian") && (tracked_objects[i].pedestrian_state == 1 ||  tracked_objects[i].pedestrian_state == 2 ||  tracked_objects[i].pedestrian_state == 3))
+		if (!strcmp(merged_objects[i].type.c_str(),"pedestrian") && (merged_objects[i].pedestrian_state == 1 || merged_objects[i].pedestrian_state == 2 || merged_objects[i].pedestrian_state == 3))
 		{
 			global_pedestrian_crossing_occupied = 1;
 		}
@@ -1499,6 +1834,10 @@ void sensor_fusion_and_monitors_cb(const t4ac_msgs::BEV_detections_list::ConstPt
 			aux = 0;
 			pub_Safe_Merge.publish(is_safe);
 		}
+		/*else if (stop == 1 && abs_vel<0.1) // In those situations in which the car is stopped but the RoboGraph dispatch does not send stop == 2 (The car is completely stopped, so ti can continue)
+		{
+			stop = 2;
+		}*/
 		else
 		{
 			if (merging_occupied)
@@ -1537,7 +1876,7 @@ void sensor_fusion_and_monitors_cb(const t4ac_msgs::BEV_detections_list::ConstPt
 	distance_overtake_monitor.header.frame_id = "/base_link";
 	distance_overtake_monitor.header.stamp = ros::Time::now();
 	pub_Distance_Overtake.publish(distance_overtake_monitor);
-*/
+
 	// End Publish the monitors //
 
 	// End Monitors //	
