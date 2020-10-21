@@ -67,6 +67,7 @@ Simulation
 #include <tf/transform_broadcaster.h>
 
 #include <visualization_msgs/Marker.h>
+#include <visualization_msgs/MarkerArray.h>
 
 // BEV Tracking includes
 #include "t4ac_msgs/BEV_detections_list.h"
@@ -214,6 +215,7 @@ int id_lanelet_pedestrian_crossing = 0;
 int id_lanelet_merging = 0;
 int global_pedestrian_crossing_occupied;
 int merging_occupied;
+double persistence_time=2.0; // Maximum difference in time to not delete an object
 
 // Visualization variables
 
@@ -305,9 +307,9 @@ int main (int argc, char ** argv)
 
 	// Tracking publishers
 
-	pub_Tracked_Obstacles_Marker = nh.advertise<visualization_msgs::Marker>("/t4ac/perception/detection/Tracked_Obstacles", 1, true); // Merged (Tracked obstacles)
-	pub_LiDAR_Obstacles_Marker = nh.advertise<visualization_msgs::Marker>("/t4ac/perception/detection/LiDAR_Obstacles", 1, true); // Only LiDAR
-    pub_VOT_Obstacles_Marker = nh.advertise<visualization_msgs::Marker>("/t4ac/perception/detection/VOT_BEV_Obstacles", 1, true); // Only vision
+	pub_Tracked_Obstacles_Marker = nh.advertise<visualization_msgs::MarkerArray>("/t4ac/perception/detection/Tracked_Obstacles", 1, true); // Merged (Tracked obstacles)
+	pub_LiDAR_Obstacles_Marker = nh.advertise<visualization_msgs::MarkerArray>("/t4ac/perception/detection/LiDAR_Obstacles", 1, true); // Only LiDAR
+    pub_VOT_Obstacles_Marker = nh.advertise<visualization_msgs::MarkerArray>("/t4ac/perception/detection/VOT_BEV_Obstacles", 1, true); // Only vision
 	
 	// End Publishers //
 
@@ -892,7 +894,7 @@ void sensor_fusion_and_monitors_cb(const t4ac_msgs::BEV_detections_list::ConstPt
 		Object object;
 	
 		object.centroid_x = -lidar_detections_msg->bev_detections_list[i].y;
-        object.centroid_y =  lidar_detections_msg->bev_detections_list[i].x;
+        object.centroid_y = -lidar_detections_msg->bev_detections_list[i].x;
 
 		geometry_msgs::PointStamped  centroid;
 		geometry_msgs::Point32 global_centroid;
@@ -930,8 +932,40 @@ void sensor_fusion_and_monitors_cb(const t4ac_msgs::BEV_detections_list::ConstPt
 		laser_objects.push_back(object);
 	}
 
-	cout<<"\nLaser objects: "<<lidar_detections_msg->bev_detections_list.size();
-    cout<<"\nVOT objects: "<<bev_trackers_list_msg->bev_trackers_list.size()<<endl<<endl;
+	visualization_msgs::MarkerArray obstacles_array;
+	int id = 0;
+
+	for (int i = 0; i < laser_objects.size(); i++)
+	{
+		visualization_msgs::Marker obstacle_points;
+
+		obstacle_points.header.frame_id = "/base_link"; // map == global coordinates. Base_link == local coordinates
+		obstacle_points.header.stamp = lidar_detections_msg->header.stamp;
+		obstacle_points.ns = "map_manager_visualization";
+		obstacle_points.action = visualization_msgs::Marker::ADD;
+		obstacle_points.type = visualization_msgs::Marker::CUBE;
+		obstacle_points.id = id;
+		id++;
+		obstacle_points.points.clear();
+
+		obstacle_points.color = colours[2]; // Only red;
+		obstacle_points.scale.x = 1;
+		obstacle_points.scale.y = 1;
+		obstacle_points.scale.z = 1;
+		obstacle_points.lifetime = ros::Duration(0.40);
+
+		/*obstacle_points.pose.position.x = laser_objects[i].global_centroid_x;
+		obstacle_points.pose.position.y = laser_objects[i].global_centroid_y;
+		obstacle_points.pose.position.z = laser_objects[i].global_centroid_z;*/
+
+        obstacle_points.pose.position.x = laser_objects[i].centroid_x;
+		obstacle_points.pose.position.y = laser_objects[i].centroid_y;
+		obstacle_points.pose.position.z = 0;
+
+		obstacles_array.markers.push_back(obstacle_points);
+	}
+
+	pub_LiDAR_Obstacles_Marker.publish(obstacles_array);
 
     // BEV Projected VOT (Visual Object Tracking)
     
@@ -939,6 +973,8 @@ void sensor_fusion_and_monitors_cb(const t4ac_msgs::BEV_detections_list::ConstPt
     int object_id = 0;
 
 	// Publish
+
+	obstacles_array.markers.clear();
 
 	for (int i = 0; i < bev_trackers_list_msg->bev_trackers_list.size(); i++)
 	{
@@ -948,15 +984,15 @@ void sensor_fusion_and_monitors_cb(const t4ac_msgs::BEV_detections_list::ConstPt
 		obstacle_points.header.stamp = bev_trackers_list_msg->header.stamp;
 		obstacle_points.ns = "map_manager_visualization";
 		obstacle_points.action = visualization_msgs::Marker::ADD;
-		obstacle_points.type = visualization_msgs::Marker::SPHERE;
+		obstacle_points.type = visualization_msgs::Marker::CUBE;
 	 	obstacle_points.id = bev_trackers_list_msg->bev_trackers_list[i].object_id;
 
 		obstacle_points.points.clear();
 
 		obstacle_points.color = colours[0]; // Only red;
-		obstacle_points.scale.x = 0.50;
-		obstacle_points.scale.y = 0.50;
-		obstacle_points.scale.z = 0.50;
+		obstacle_points.scale.x = 1;
+		obstacle_points.scale.y = 1;
+		obstacle_points.scale.z = 1;
 		obstacle_points.lifetime = ros::Duration(0.40);
 
 		/*obstacle_points.pose.position.x = laser_objects[i].global_centroid_x;
@@ -967,8 +1003,12 @@ void sensor_fusion_and_monitors_cb(const t4ac_msgs::BEV_detections_list::ConstPt
 		obstacle_points.pose.position.y = bev_trackers_list_msg->bev_trackers_list[i].y;
 		obstacle_points.pose.position.z = 0;
 
-		pub_VOT_Obstacles_Marker.publish(obstacle_points);
+		obstacles_array.markers.push_back(obstacle_points);
 	}
+
+	pub_VOT_Obstacles_Marker.publish(obstacles_array);
+
+	double vot_time = bev_trackers_list_msg->header.stamp.toSec();
 
     for (int i=0; i<bev_trackers_list_msg->bev_trackers_list.size(); i++)
     {
@@ -984,10 +1024,9 @@ void sensor_fusion_and_monitors_cb(const t4ac_msgs::BEV_detections_list::ConstPt
 		cout << "Type: " << bev_trackers_list_msg->bev_trackers_list[i].type << endl;
         if (laser_objects.size() > 0 && (!strcmp(bev_trackers_list_msg->bev_trackers_list[i].type.c_str(),"car") || !strcmp(bev_trackers_list_msg->bev_trackers_list[i].type.c_str(),"person")))
         {
-            double time = bev_trackers_list_msg->header.stamp.toSec();
             object_id = bev_trackers_list_msg->bev_trackers_list[i].object_id;
-
-            geometry_msgs::PointStamped  centroid;
+			cout << "VOT id: " << object_id;
+            geometry_msgs::PointStamped centroid;
 			geometry_msgs::Point32 global_centroid;
 
 			centroid.point.x = vot_x;
@@ -1014,15 +1053,16 @@ void sensor_fusion_and_monitors_cb(const t4ac_msgs::BEV_detections_list::ConstPt
 				}
             }
 			//cout << "Max diff lidar vot: " << max_diff_lidar_vot << endl;
-            if (max_diff_lidar_vot < 1.5 && index_most_similar != -1)
+            if (max_diff_lidar_vot < 2.0 && index_most_similar != -1)
             // In order to merge both information, the centroid between distance must be less that 1.5 m (VOT projected centroid and closest LiDAR centroid)
             {
                 int flag = 0;
 
                 // 1. Find out if current merged object was previously stored. Id does, update the object
 
-                for (int k=0; k<<tracked_objects.size(); k++)
+                for (int k=0; k<tracked_objects.size(); k++)
                 {
+					cout << "ID tracked: " << tracked_objects[k].object_id << endl;
                     if (tracked_objects[k].object_id == object_id)
                     {
 						tracked_objects[k].centroid_x = laser_objects[index_most_similar].centroid_x;
@@ -1068,7 +1108,46 @@ void sensor_fusion_and_monitors_cb(const t4ac_msgs::BEV_detections_list::ConstPt
         }
     }
 
+	cout<<"\nLaser objects: "<<lidar_detections_msg->bev_detections_list.size();
+    cout<<"\nVOT objects: "<<bev_trackers_list_msg->bev_trackers_list.size();
+    cout<<"\nTracked objects: "<<tracked_objects.size()<<endl<<endl;
+
+	// Update tracked objects
+
+	if (tracked_objects.size() > 0 && bev_trackers_list_msg->bev_trackers_list.size() > 0)
+	{
+		vector<Tracked_Object> tracked_objects_aux(tracked_objects);
+
+		// 1. Store in auxiliar buffer
+		/*
+		for (int n=0; n<tracking_objects.size(); n++)
+		{
+			tracking_points_aux_lidar.push_back(tracking_points_lidar[n]);
+		}*/
+
+		// 2. Erase: If the difference between last sample time and current time is higher than three seconds, erase this element
+
+		for (int t=0; t<tracked_objects.size(); t++)
+		{
+			if (tracked_objects[t].time + persistence_time < vot_time)
+			{
+				tracked_objects_aux.erase(tracked_objects_aux.begin()+t);
+			}
+		}
+		
+		// 3. Update
+
+		tracked_objects.clear();
+		
+		for (int p=0; p<tracked_objects_aux.size(); p++)
+		{
+			tracked_objects.push_back(tracked_objects_aux[p]);
+		}
+	}
+
 	// Publish merged obstacles 
+
+	obstacles_array.markers.clear();
 
 	for (int i = 0; i < tracked_objects.size(); i++)
 	{
@@ -1078,23 +1157,25 @@ void sensor_fusion_and_monitors_cb(const t4ac_msgs::BEV_detections_list::ConstPt
 		obstacle_points.header.stamp = bev_trackers_list_msg->header.stamp;
 		obstacle_points.ns = "map_manager_visualization";
 		obstacle_points.action = visualization_msgs::Marker::ADD;
-		obstacle_points.type = visualization_msgs::Marker::SPHERE;
+		obstacle_points.type = visualization_msgs::Marker::CUBE;
 	 	obstacle_points.id = tracked_objects[i].object_id;
 
 		obstacle_points.points.clear();
 
 		obstacle_points.color = colours[1]; // Only green;
-		obstacle_points.scale.x = 0.50;
-		obstacle_points.scale.y = 0.50;
-		obstacle_points.scale.z = 0.50;
+		obstacle_points.scale.x = 1;
+		obstacle_points.scale.y = 1;
+		obstacle_points.scale.z = 1;
 		obstacle_points.lifetime = ros::Duration(0.40);
 
         obstacle_points.pose.position.x = tracked_objects[i].centroid_x;
 		obstacle_points.pose.position.y = tracked_objects[i].centroid_y;
 		obstacle_points.pose.position.z = 0;
 
-		pub_Tracked_Obstacles_Marker.publish(obstacle_points);
+		obstacles_array.markers.push_back(obstacle_points);
 	}
+
+	pub_Tracked_Obstacles_Marker.publish(obstacles_array);
 
     // Monitors //
 /*
