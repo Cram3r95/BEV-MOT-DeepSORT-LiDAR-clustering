@@ -1,3 +1,5 @@
+NOTES: This repository is uncomplete and messy. I will study again Multi-Object Tracking from September to December, cannot improve neither this repository nor SmartMOT now. If you want to try, please, first take a look of the DeepSORT algorithm and late fusion concepts. 
+
 # BEV-MOT-DeepSORT-LiDAR-clustering
 
 This is repository of my MSc final project titled "Predictive Techniques for Scene Understanding by using Deep Learning".
